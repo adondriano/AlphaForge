@@ -2,7 +2,7 @@
 
 > **AI-Powered Quantitative Strategy Studio & Prop-Firm Execution Engine**
 
-AlphaForge is an end-to-end algorithmic trading platform that bridges the gap between qualitative trading concepts and quantitative execution. It ingests video tutorials or plain-text strategy descriptions, transpiles them into executable quantitative code, optimizes parameters using Machine Learning (Bayesian Optimization), and manages paper and live execution wrapped in prop-firm risk envelopes (FTMO / The5ers).
+AlphaForge is an end-to-end algorithmic trading platform that bridges the gap between qualitative trading concepts and quantitative execution. It ingests video tutorials or plain-text strategy descriptions, transpiles them into executable quantitative code, optimizes parameters using Machine Learning (Bayesian Optimization), and manages paper and live execution wrapped in prop-firm risk envelopes.
 
 ---
 
