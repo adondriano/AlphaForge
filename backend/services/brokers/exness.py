@@ -49,11 +49,24 @@ from .base import (
 #: SHA-256 of the empty byte sequence — the body hash for every GET.
 EMPTY_BODY_HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
 
-#: Placeholder only. Exness issues the Gateway per account in Key Management's
-#: DNS widget — there is no single public gateway for all accounts. Keeping a
-#: value here lets the field render an example without pretending it works.
+#: Example only — this host is not a real Exness gateway and never connects.
+#: Exness issues the Gateway per account in the DNS widget in Key Management
+#: and there is no public default, so the field can only ever offer a shape to
+#: copy. Because it is displayed as the field's placeholder it has also been
+#: pasted in verbatim, so it is treated as "not supplied" everywhere below.
 DEFAULT_GATEWAY = "https://gateway.exness.com"
 SIGN_VERSION = 1
+
+#: Market-data host. Also an example: if the DNS widget gives you a realtime
+#: host, set it in the WebSocket URL field and this is never used.
+DEFAULT_WS_URL = "wss://ws.api.exness.com"
+
+GATEWAY_HINT = (
+    "Exness issues the real Gateway per account in the DNS widget in Key "
+    "Management, and there is no public default — paste that exact value into "
+    "the Gateway URL field. https://gateway.exness.com is only an example and "
+    "will never connect."
+)
 
 #: What to do about each public auth error, in plain language.
 #:
@@ -181,6 +194,24 @@ def _base_url(value: str) -> str:
     return f"https://{parts.netloc}"
 
 
+def is_placeholder_gateway(value: str) -> bool:
+    """True when the value is the example host rather than a real gateway.
+
+    The placeholder is rendered as the field's placeholder, so it ends up
+    pasted in as if it were a real value. Counting that as "supplied" let the
+    exact failure it causes through without a hint.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        return (
+            urlsplit((value or "").strip()).hostname
+            == urlsplit(DEFAULT_GATEWAY).hostname
+        )
+    except Exception:
+        return False
+
+
 class ExnessProvider(BrokerProvider):
     id = "exness"
     label = "Exness"
@@ -211,18 +242,21 @@ class ExnessProvider(BrokerProvider):
         CredentialField(
             key="gateway",
             label="Gateway URL",
-            placeholder=DEFAULT_GATEWAY,
+            # A template rather than a plausible-looking host: the previous
+            # placeholder read like a real address and got pasted in, which
+            # then failed as an opaque transport error.
+            placeholder="https://<gateway-from-key-management>",
             help=(
-                "HTTPS Gateway from the DNS widget in Key Management. This is "
-                "issued per account and the example above will not work for "
-                "you — replace it with the exact value Exness shows."
+                "Required. The HTTPS Gateway shown in the DNS widget in "
+                "Exness → Personal Area → Key Management. It is issued per "
+                "account and there is no public default."
             ),
-            required=False,
+            required=True,
         ),
         CredentialField(
             key="ws_url",
             label="WebSocket URL",
-            placeholder="wss://ws.api.exness.com",
+            placeholder="wss://<ws-host-from-key-management>",
             help=(
                 "Market data is stream-only. Override if the DNS widget gives "
                 "you a different realtime host."
@@ -241,6 +275,11 @@ class ExnessProvider(BrokerProvider):
         account_id = str(creds.get("account_id") or "").strip()
         if not _ACCOUNT_ID.match(account_id) or int(account_id) > 2 ** 64 - 1:
             return "Account ID must be a positive number."
+        # Catch the example host before it is stored. Left until connect time it
+        # surfaces as an opaque transport error that looks like a network fault.
+        gateway = str(creds.get("gateway") or "").strip()
+        if gateway and is_placeholder_gateway(gateway):
+            return f"Gateway URL is still the example value. {GATEWAY_HINT}"
         try:
             load_signing_key(str(creds.get("private_key") or ""))
         except ExnessError as exc:
@@ -262,36 +301,32 @@ class ExnessProvider(BrokerProvider):
 
         supplied = str(creds.get("gateway") or "").strip()
         gateway = _base_url(supplied or DEFAULT_GATEWAY)
+        # A pasted example counts as no gateway at all, otherwise this failure
+        # arrives with no hint — exactly as it did the first time.
+        placeholder = not supplied or is_placeholder_gateway(gateway)
         path = f"/v1/trading/access-point?account_id={account_id}"
         try:
             data = self._request(creds, "GET", gateway, path)
         except ExnessError as exc:
-            if not supplied:
-                # The user left the field blank, so every failure from here is
-                # really "we guessed the host" — say so instead of blaming keys.
+            if placeholder:
                 raise ExnessError(
-                    f"{exc} — no Gateway URL was given, so the built-in example "
-                    f"({DEFAULT_GATEWAY}) was used. Exness issues the real "
-                    f"Gateway per account in Key Management (DNS widget); paste "
-                    f"that exact value into the Gateway URL field."
+                    f"{exc} — the Gateway URL is the example value, not a real "
+                    f"gateway. {GATEWAY_HINT}"
                 ) from exc
             raise
         except Exception as exc:
-            # Not an API rejection at all — the host could not be reached. With
-            # the placeholder gateway that is the expected outcome, and a bare
-            # errno here («[Errno 16] Device or resource busy») tells nobody
-            # anything, so name the cause and keep the detail.
-            if not supplied:
-                raise ExnessError(
-                    f"Could not reach the gateway ({gateway}): "
-                    f"{describe_exception(exc)} — no Gateway URL was given, so "
-                    f"the built-in example {DEFAULT_GATEWAY} was used. Exness "
-                    f"issues the real Gateway per account in Key Management "
-                    f"(DNS widget); paste that exact value into the Gateway URL "
-                    f"field."
-                ) from exc
+            # Not an API rejection at all — the host could not be reached. A
+            # bare errno here («[Errno 16] Device or resource busy») tells
+            # nobody anything, so name the cause and keep the detail.
+            suffix = (
+                f" — the Gateway URL is the example value, not a real gateway. "
+                f"{GATEWAY_HINT}"
+                if placeholder
+                else ""
+            )
             raise ExnessError(
-                f"Could not reach the gateway ({gateway}): {describe_exception(exc)}"
+                f"Could not reach the gateway ({gateway}): "
+                f"{describe_exception(exc)}{suffix}"
             ) from exc
         value = data.get("access_point")
         if not isinstance(value, str) or not value:
@@ -602,7 +637,7 @@ class ExnessProvider(BrokerProvider):
                 "data cannot be streamed. Install it to enable live quotes."
             ) from exc
 
-        ws_url = str(creds.get("ws_url") or "").strip() or "wss://ws.api.exness.com"
+        ws_url = str(creds.get("ws_url") or "").strip() or DEFAULT_WS_URL
         account_id = str(creds.get("account_id") or "").strip()
         path = f"/v1/ticks/accounts/{account_id}/ws/ticks"
         headers = sign_headers(

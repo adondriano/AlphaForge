@@ -149,6 +149,7 @@ def test_exness_accepts_well_formed_credentials():
         "account_id": "123456",
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
     }) is None
 
 
@@ -330,6 +331,7 @@ def test_unsupported_symbol_is_halted_not_shadowed(monkeypatch):
             "account_id": "123456",
             "api_key": "exnsk-x",
             "private_key": VECTOR_KEY_HEX,
+            "gateway": "https://mt-gateway.example.com",
         }),
     )
     result = service.place_order(
@@ -612,8 +614,8 @@ def test_unreachable_default_gateway_is_named_not_just_the_errno(monkeypatch):
     assert "Could not reach the gateway" in text
     assert "OSError" in text                 # the class, not just the errno
     assert "test_brokers.py" in text         # and where it came from
-    assert "no Gateway URL was given" in text
-    assert "gateway.exness.com" in text
+    assert "example value" in text           # and that the host is not real
+    assert "will never connect" in text
 
 
 def test_unreachable_supplied_gateway_names_the_host(monkeypatch):
@@ -664,3 +666,90 @@ def test_status_reports_the_class_for_unexpected_failures(monkeypatch):
     assert "OSError" in result["reason"]
     assert "Device or resource busy" in result["reason"]
     assert "test_brokers.py" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# The example host
+#
+# The placeholder read like a real address and was pasted in, then failed as an
+# opaque ConnectError. It must be rejected before it is ever stored.
+# ---------------------------------------------------------------------------
+
+def test_placeholder_gateway_is_rejected_before_saving():
+    """Storing the example host is never useful — refuse it at validation."""
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://gateway.exness.com",
+    }
+    problem = provider.validate(creds)
+    assert problem is not None
+    assert "example value" in problem
+    assert "Key Management" in problem
+
+
+def test_placeholder_gateway_is_rejected_with_trailing_slash():
+    """A cosmetic difference must not smuggle the example past the check."""
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://gateway.exness.com/",
+    }
+    assert provider.validate(creds) is not None
+
+
+def test_a_real_gateway_passes_validation():
+    """Anything that is not the example host is accepted here."""
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
+    }
+    assert provider.validate(creds) is None
+
+
+def test_pasted_placeholder_gets_the_hint_on_connect(monkeypatch):
+    """If it slips through to connect time, still say it was the example."""
+    provider = ExnessProvider()
+
+    def boom(*args, **kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(provider, "_request", boom)
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://gateway.exness.com",
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._access_point(creds)
+
+    text = str(excinfo.value)
+    assert "example value" in text
+    assert "will never connect" in text
+
+
+def test_gateway_field_is_required():
+    """There is no working default, so the form must not imply one."""
+    field = next(f for f in ExnessProvider.fields if f.key == "gateway")
+    assert field.required is True
+    placeholder = field.placeholder or ""
+    assert "<" in placeholder               # a template, not a real host
+    assert "gateway.exness.com" not in placeholder
+
+
+def test_blanks_are_still_reported_as_missing():
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+    }
+    assert "Gateway URL" in provider.validate(creds)

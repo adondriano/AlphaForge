@@ -91,8 +91,15 @@ and then immediately tries a live call. You get one of three answers:
    - **Account ID** — the numeric Exness Terminal account number
    - **API Key** — starts `exnsk-`
    - **Private Key** — shown once, either 128 hex characters or a PEM block
-4. In AlphaForge, also copy the **Gateway URL** from the DNS widget in Key
-   Management if one is shown. Otherwise the default is used.
+4. Copy the **Gateway URL** from the DNS widget in Key Management and paste it
+   into AlphaForge. This field is **required** — Exness issues it per account
+   and there is no public default.
+
+   > **⚠️ Do not paste the example from the placeholder.** The field shows
+   > `https://<gateway-from-key-management>` as a template. An earlier version
+   > showed `https://gateway.exness.com`, which is not a real gateway; it was
+   > copied verbatim and failed with an opaque connection error. If you see
+   > "Gateway URL is still the example value", you have pasted a placeholder.
 
 > The private key is shown **once**. If you lose it, generate a new key pair —
 > it cannot be recovered.
@@ -212,6 +219,8 @@ and the order is **halted**, not paper-filled.
 | **`Exness 401 (1000)`** `AUTH_INVALID_API_KEY` | Exness does not recognise that API key. Re-copy the whole `exnsk-…` value with no stray spaces, confirm it is still active, and confirm eligibility (region-limited, Exness Terminal account only) |
 | **`Exness 401 (1001)`** `AUTH_INVALID_SIGNATURE` | The private key does not belong to that API key. Exness shows the private key **once** — if it was not saved at creation, generate a new key pair and paste both halves in together |
 | **`Exness 401 (1002)`** `AUTH_PERMISSION_DENIED` | The key exists but lacks the trading scope. Recreate it in Key Management with order and position permissions enabled |
+| **"Gateway URL is still the example value"** | You pasted the placeholder. Get the real HTTPS Gateway from the DNS widget in Exness → Key Management |
+| **"Could not reach the gateway (…)"** | The host in the Gateway URL could not be connected to. Almost always a placeholder or a typo, not a problem with your API key |
 | Saved but never connects (Exness) | Wrong Gateway URL, or the account is a standard MT5 account rather than an Exness Terminal account |
 | Saved but never connects (OANDA) | Wrong environment. Blank = practice, `live` = real money |
 | Exness live price never appears | Market data is stream-only. The `websockets` package must be installed and the WebSocket URL must be correct |
