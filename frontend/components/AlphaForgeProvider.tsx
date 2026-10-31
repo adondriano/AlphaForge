@@ -1015,7 +1015,10 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
     const owner = user?.id;
     if (!owner || seededUsers.current.has(owner)) return;
     if (demoAttempted.current) return;
-    if (strategies.length > 0) {
+    // Only seed when this account owns nothing — legacy unowned rows are public
+    // demo data that every visitor sees, and they must not block a new account
+    // from getting its own copy.
+    if (strategies.some((strategy) => strategy.user_id === owner)) {
       seededUsers.current.add(owner);
       return;
     }
@@ -1039,6 +1042,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
           overrides: { fast_ema: 50, slow_ema: 200, breakout_lookback: 55, atr_sl_mult: 3, rr_ratio: 3, risk_per_trade_pct: 0.75, min_signal_strength: 2 } as Record<string, number>,
         },
       ];
+      const created: Strategy[] = [];
       for (const seed of seeds) {
         try {
           const response = await api.transpile({
@@ -1050,28 +1054,30 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
             ...response.spec,
             parameters: { ...response.spec.parameters, ...seed.overrides },
           };
-          await createStrategy({ spec, engine: response.meta.engine });
+          const strategy = await createStrategy({ spec, engine: response.meta.engine });
+          if (strategy) created.push(strategy);
         } catch {
           /* never block the UI */
         }
       }
       // give each seeded strategy one optimised generation so lineage has diffs
-      const seeded = await dataStore.listStrategies();
-      for (const strategy of seeded.slice(0, 3)) {
+      for (const strategy of created) {
         try {
           await runOptimize(strategy, { nTrials: 10, objective: "prop_readiness", bars: 1800 });
         } catch {
           /* ignore */
         }
       }
-      notify({
-        kind: "info",
-        title: "Demo strategies loaded",
-        detail: "Three strategies with baseline + optimised parameter versions.",
-      });
+      if (created.length) {
+        notify({
+          kind: "info",
+          title: "Demo strategies loaded",
+          detail: `${created.length} strategies with baseline + optimised parameter versions.`,
+        });
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, authReady, isGuest, strategies.length, user?.id]);
+  }, [ready, authReady, isGuest, strategies, user?.id]);
 
   const value = useMemo<AlphaForgeContextValue>(
     () => ({
