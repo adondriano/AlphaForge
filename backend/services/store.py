@@ -277,19 +277,52 @@ class Store:
         return max([int(r.get("version") or 0) for r in existing] or [0]) + 1
 
     def insert_optimization(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert a parameter version.
+
+        ``public.optimizations`` carries a partial unique index
+        (``optimizations_one_active_idx``) that allows at most one active
+        version per strategy, so activating a new version requires clearing
+        the flag on its siblings *first*. Without this the insert raises a
+        23505 unique violation, ``_remote`` silently degrades to the in-memory
+        store, and the caller then writes a dangling ``active_optimization_id``
+        that violates the strategies foreign key.
+        """
         row = {**payload}
         row.setdefault("id", _new_id())
         row.setdefault("created_at", _now())
+        strategy_id = row.get("strategy_id")
+        promotes = bool(row.get("is_active")) and bool(strategy_id)
+
         if not self.enabled:
             with self._lock:
+                if promotes:
+                    for existing in self._memory[OPTIMIZATIONS]:
+                        if existing.get("strategy_id") == strategy_id:
+                            existing["is_active"] = False
                 self._memory[OPTIMIZATIONS].append(dict(row))
                 self._save_local_state()
             return dict(row)
+
         def build():
+            if promotes:
+                try:
+                    self._run(
+                        OPTIMIZATIONS,
+                        self._client.table(OPTIMIZATIONS)
+                        .update({"is_active": False})
+                        .eq("strategy_id", strategy_id)
+                        .neq("id", row["id"]),
+                    )
+                except Exception:  # deactivation is best effort; the insert is the point
+                    pass
             return self._maybe_select(self._client.table(OPTIMIZATIONS).insert(row))
 
         def fallback():
             with self._lock:
+                if promotes:
+                    for existing in self._memory[OPTIMIZATIONS]:
+                        if existing.get("strategy_id") == strategy_id:
+                            existing["is_active"] = False
                 self._memory[OPTIMIZATIONS].append(dict(row))
             return dict(row)
 
@@ -306,13 +339,16 @@ class Store:
                 self._save_local_state()
             return True
         def build():
-            self._run(
-                OPTIMIZATIONS,
-                self._client.table(OPTIMIZATIONS)
-                .update({"is_active": False})
-                .eq("strategy_id", strategy_id)
-                .neq("id", optimization_id),
-            )
+            try:
+                self._run(
+                    OPTIMIZATIONS,
+                    self._client.table(OPTIMIZATIONS)
+                    .update({"is_active": False})
+                    .eq("strategy_id", strategy_id)
+                    .neq("id", optimization_id),
+                )
+            except Exception:  # clearing the siblings must not abort the promotion
+                pass
             return (self._client.table(OPTIMIZATIONS)
                     .update({"is_active": True})
                     .eq("id", optimization_id))

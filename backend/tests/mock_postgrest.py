@@ -4,6 +4,15 @@ Not part of the product — it exists so the persistence layer can be tested in
 environments (CI, sandboxes) with no outbound access to Supabase::
 
     python tests/mock_postgrest.py 8123
+
+It deliberately mirrors the constraints declared in ``schema.sql``:
+
+* ``optimizations_strategy_version_key``  unique (strategy_id, version)
+* ``optimizations_one_active_idx``        unique (strategy_id) where is_active
+* ``strategies_active_optimization_id_fkey``  -> optimizations(id)
+
+without them the in-process store and PostgREST behave identically and real
+Postgres-only failures (unique/foreign-key violations) slip through the suite.
 """
 
 from __future__ import annotations
@@ -45,6 +54,56 @@ def _match(row: dict, filters: dict[str, list[str]]) -> bool:
                 if str(row.get(key)) != raw:
                     return False
     return True
+
+
+def _pg_error(code: str, message: str, details: str) -> dict:
+    return {"code": code, "details": details, "hint": None, "message": message}
+
+
+def _check(table: str, candidate: dict, row_id: str | None = None) -> dict | None:
+    """Return a Postgres-shaped error dict when ``candidate`` breaks a constraint."""
+    rows = DB.setdefault(table, [])
+
+    if table == "optimizations":
+        for other in rows:
+            if other.get("id") == (row_id or candidate.get("id")):
+                continue
+            if (
+                candidate.get("version") is not None
+                and other.get("strategy_id") == candidate.get("strategy_id")
+                and str(other.get("version")) == str(candidate.get("version"))
+            ):
+                return _pg_error(
+                    "23505",
+                    'duplicate key value violates unique constraint "optimizations_strategy_version_key"',
+                    "Key (strategy_id, version)=({0}, {1}) already exists.".format(
+                        candidate.get("strategy_id"), candidate.get("version")
+                    ),
+                )
+            if (
+                candidate.get("is_active")
+                and other.get("is_active")
+                and other.get("strategy_id") == candidate.get("strategy_id")
+            ):
+                return _pg_error(
+                    "23505",
+                    'duplicate key value violates unique constraint "optimizations_one_active_idx"',
+                    "Key (strategy_id)=({0}) already exists.".format(candidate.get("strategy_id")),
+                )
+
+    if table == "strategies":
+        active = candidate.get("active_optimization_id")
+        if active:
+            known = {row.get("id") for row in DB.setdefault("optimizations", [])}
+            if active not in known:
+                return _pg_error(
+                    "23503",
+                    'insert or update on table "strategies" violates foreign key '
+                    'constraint "strategies_active_optimization_id_fkey"',
+                    "Key (active_optimization_id)=({0}) is not present in table "
+                    '"optimizations".'.format(active),
+                )
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -97,15 +156,21 @@ class Handler(BaseHTTPRequestHandler):
             if "resolution=merge-duplicates" in prefer:
                 existing = next((r for r in rows if r.get("id") == row.get("id")), None)
                 if existing:
+                    merged = {**existing, **row}
+                    violation = _check(table, merged, existing.get("id"))
+                    if violation:
+                        self._send(violation, 409)
+                        return
                     existing.update(row)
                     stored.append(existing)
                     continue
+            violation = _check(table, row)
+            if violation:
+                self._send(violation, 409)
+                return
             rows.append(row)
             stored.append(row)
-        if "return=representation" in prefer or True:
-            self._send(stored, 201)
-        else:
-            self._send([], 201)
+        self._send(stored, 201)
 
     def do_PATCH(self):
         table = self._table()
@@ -115,6 +180,11 @@ class Handler(BaseHTTPRequestHandler):
         updated = []
         for row in rows:
             if _match(row, query):
+                merged = {**row, **body}
+                violation = _check(table, merged, row.get("id"))
+                if violation:
+                    self._send(violation, 409)
+                    return
                 row.update(body)
                 updated.append(row)
         self._send(updated)
