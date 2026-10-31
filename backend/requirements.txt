@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# AlphaForge engine — full local development stack
+#   pip install -r requirements.txt
+# The runtime degrades gracefully when the optional quant packages below are
+# missing, so a slim install (see api/requirements.txt) still works.
+# ---------------------------------------------------------------------------
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic>=2.7,<3
+httpx==0.27.2
+python-dotenv==1.0.1
+
+# --- Supabase -------------------------------------------------------------
+supabase==2.7.4
+
+# --- Quantitative / ML stack (optional but recommended) --------------------
+optuna==3.6.1
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# --- Execution ------------------------------------------------------------
+# MetaTrader5 is a Windows-only C extension. Uncomment on Windows hosts only.
+# MetaTrader5==5.0.45
+
+# --- Tests ----------------------------------------------------------------
+pytest==8.3.2
