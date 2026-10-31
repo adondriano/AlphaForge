@@ -464,3 +464,80 @@ def test_supplied_gateway_failure_does_not_blame_the_default(monkeypatch):
 
     assert "No Gateway URL" not in str(excinfo.value)
     assert "built-in example" not in str(excinfo.value)
+
+
+def test_failure_reason_is_persisted_with_the_connection(monkeypatch):
+    """A failed check must store *why*, not just the word "error".
+
+    Knowing a connection is in "error" tells the user nothing they can act on.
+    The reason has to survive the request so it can be read from the UI or the
+    database later instead of being reproduced.
+    """
+    service = BrokerService()
+    recorded = {}
+
+    class _RecordingVault(_FakeVault):
+        def touch(self, connection_id, status, error=None):
+            recorded.update(connection_id=connection_id, status=status, error=error)
+
+    monkeypatch.setattr("services.broker_service.vault", _RecordingVault())
+
+    class _BrokenProvider:
+        id = "exness"
+        label = "Exness"
+        unsupported = ()
+
+        @staticmethod
+        def status(creds):
+            return {
+                "available": False,
+                "connected": False,
+                "mode": "unavailable",
+                "reason": "Exness 401 (1001): bad signature",
+            }
+
+        @staticmethod
+        def warnings_for(creds):
+            return []
+
+    import services.broker_service as module
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _BrokenProvider)
+
+    service.status(None, "u1")
+
+    assert recorded["status"] == "error"
+    assert recorded["error"] == "Exness 401 (1001): bad signature"
+    assert recorded["connection_id"] == "conn-1"
+
+
+def test_successful_check_clears_the_stored_reason(monkeypatch):
+    """Reconnecting must not leave a stale error attached to the row."""
+    service = BrokerService()
+    recorded = {}
+
+    class _RecordingVault(_FakeVault):
+        def touch(self, connection_id, status, error=None):
+            recorded.update(status=status, error=error)
+
+    monkeypatch.setattr("services.broker_service.vault", _RecordingVault())
+
+    class _WorkingProvider:
+        id = "exness"
+        label = "Exness"
+        unsupported = ()
+
+        @staticmethod
+        def status(creds):
+            return {"available": True, "connected": True, "mode": "live"}
+
+        @staticmethod
+        def warnings_for(creds):
+            return []
+
+    import services.broker_service as module
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _WorkingProvider)
+
+    service.status(None, "u1")
+
+    assert recorded["status"] == "connected"
+    assert recorded["error"] is None

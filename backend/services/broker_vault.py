@@ -128,6 +128,7 @@ def public_row(row: Dict[str, Any]) -> Dict[str, Any]:
         "provider": row.get("provider"),
         "label": row.get("label") or "",
         "last_status": row.get("last_status"),
+        "last_error": row.get("last_error") or "",
         "last_checked_at": row.get("last_checked_at"),
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
@@ -247,16 +248,33 @@ class BrokerVault:
             return False
         return True
 
-    def touch(self, connection_id: str, status: str) -> None:
-        """Record the outcome of the last check — never the credentials."""
+    def touch(self, connection_id: str, status: str, error: Optional[str] = None) -> None:
+        """Record the outcome of the last check — never the credentials.
+
+        The reason is stored next to the status, not just the status word.
+        Knowing only that a connection is in "error" is useless to the person
+        trying to fix it: the message has to be readable later, from the UI or
+        straight out of the database, without reproducing the failure.
+        """
         if not self._client:
             return
         try:
             self._table().update(
-                {"last_status": status[:200], "last_checked_at": _now()}
+                {
+                    "last_status": status[:200],
+                    "last_error": (error or "")[:500],
+                    "last_checked_at": _now(),
+                }
             ).eq("id", connection_id).execute()
         except Exception as exc:
             self._last_error = str(exc)
+            # A missing last_error column must not lose the status update too.
+            try:
+                self._table().update(
+                    {"last_status": status[:200], "last_checked_at": _now()}
+                ).eq("id", connection_id).execute()
+            except Exception:
+                pass
 
 
 def _now() -> str:

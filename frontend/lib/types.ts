@@ -310,6 +310,8 @@ export interface BrokerConnection {
   provider: string;
   label: string;
   last_status: string | null;
+  /** Why the last check failed. Empty when it succeeded or never ran. */
+  last_error?: string;
   last_checked_at: string | null;
   created_at: string;
   updated_at: string;

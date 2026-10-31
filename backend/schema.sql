@@ -168,6 +168,9 @@ create table if not exists public.broker_connections (
   -- outcome of the last check, so the UI can show a stale connection without
   -- re-authenticating on every page load
   last_status     text,
+  -- why the last check failed. Kept with the row so a connection problem can be
+  -- read back from the UI or the database instead of being reproduced.
+  last_error      text,
   last_checked_at timestamptz,
   created_at      timestamptz not null default now(),
   updated_at      timestamptz not null default now(),

@@ -130,7 +130,11 @@ class BrokerService:
         result.setdefault("provider", provider.id)
         result["connection_id"] = row.get("id")
         result["warnings"] = self.warnings_for(provider, creds)
-        vault.touch(str(row.get("id")), "connected" if result.get("connected") else "error")
+        vault.touch(
+            str(row.get("id")),
+            "connected" if result.get("connected") else "error",
+            result.get("reason"),
+        )
         return result
 
     def price(

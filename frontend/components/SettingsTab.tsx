@@ -405,6 +405,11 @@ export default function SettingsTab() {
                       ? `Last check: ${connection.last_status}`
                       : "Never checked"}
                   </div>
+                  {connection.last_error ? (
+                    <div className="mt-1 break-words rounded-md border border-rose-400/20 bg-rose-400/[0.06] px-2 py-1 text-[11px] leading-snug text-rose-200/80">
+                      {connection.last_error}
+                    </div>
+                  ) : null}
                 </div>
                 <button
                   className="btn-ghost text-[12px]"
