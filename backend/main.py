@@ -1427,8 +1427,22 @@ def delete_connection(connection_id: str, request: Request) -> Dict[str, Any]:
 
 
 @app.get("/api/broker/status")
-def broker_status(request: Request, connection_id: Optional[str] = None) -> Dict[str, Any]:
-    return brokers_service.status(connection_id, _user_id_from_request(request))
+def broker_status(
+    request: Request,
+    connection_id: Optional[str] = None,
+    probe: bool = False,
+) -> Dict[str, Any]:
+    """The connection's state.
+
+    By default this reports what the last check recorded, without contacting
+    the broker — rendering a page should not wait on a live round trip, and
+    certainly should not report "disconnected" merely because that call was
+    slower than the browser was willing to wait. Pass ``?probe=1`` to ask the
+    broker directly.
+    """
+    return brokers_service.status(
+        connection_id, _user_id_from_request(request), probe=probe
+    )
 
 
 @app.get("/api/broker/price")

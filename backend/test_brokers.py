@@ -859,3 +859,85 @@ def test_unauthenticated_calls_are_never_cached(monkeypatch):
     assert first["connected"] is False
     assert second["connected"] is False
     assert second.get("cached") is None        # and nothing was cached
+
+
+# ---------------------------------------------------------------------------
+# Rendering a page must not depend on a live probe
+# ---------------------------------------------------------------------------
+
+class _StoredVault(_FakeVault):
+    """A vault whose row carries the outcome of a previous check."""
+
+    def __init__(self, last_status="connected", last_error="", checked="2026-10-31T22:09:30Z"):
+        super().__init__({"account_id": "123456", "api_key": "exnsk-x", "private_key": VECTOR_KEY_HEX})
+        self.row = {
+            "id": "conn-1",
+            "user_id": "u1",
+            "provider": "exness",
+            "last_status": last_status,
+            "last_error": last_error,
+            "last_checked_at": checked,
+        }
+
+    def list_for(self, user_id):
+        return [self.row]
+
+    def get(self, connection_id, user_id):
+        row = dict(self.row)
+        row["credentials"] = self._creds
+        return row
+
+
+def test_snapshot_does_not_contact_the_broker(monkeypatch):
+    """Rendering the page must not trigger a live round trip."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    monkeypatch.setattr("services.broker_service.vault", _StoredVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    result = BrokerService().status(None, "u1", probe=False)
+
+    assert _CountingProvider.calls == 0          # broker never contacted
+    assert result["connected"] is True
+    assert result["from_storage"] is True
+    assert result["checked_at"] == "2026-10-31T22:09:30Z"
+
+
+def test_snapshot_surfaces_the_stored_failure_reason(monkeypatch):
+    """A previously recorded error must still be explained, not hidden."""
+    import services.broker_service as module
+
+    vault = _StoredVault(last_status="error", last_error="Exness 401 (1001)")
+    monkeypatch.setattr("services.broker_service.vault", vault)
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    result = BrokerService().status(None, "u1", probe=False)
+
+    assert result["connected"] is False
+    assert result["reason"] == "Exness 401 (1001)"
+    assert result["mode"] == "unavailable"
+
+
+def test_snapshot_still_requires_a_signed_in_user(monkeypatch):
+    """Convenience must not become a way to read someone else's state."""
+    import services.broker_service as module
+
+    monkeypatch.setattr("services.broker_service.vault", _StoredVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    result = BrokerService().status(None, None, probe=False)
+    assert result["connected"] is False
+    assert "Sign in" in result["reason"]
+
+
+def test_probe_is_still_available_when_credentials_change(monkeypatch):
+    """Saving is the moment to ask the broker for real."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    monkeypatch.setattr("services.broker_service.vault", _StoredVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    BrokerService().status(None, "u1", probe=True)
+    assert _CountingProvider.calls == 1

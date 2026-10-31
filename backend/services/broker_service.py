@@ -135,8 +135,22 @@ class BrokerService:
     # calls
     # ------------------------------------------------------------------
     def status(
-        self, connection_id: Optional[str] = None, user_id: Optional[str] = None
+        self,
+        connection_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        probe: bool = True,
     ) -> Dict[str, Any]:
+        """The connection's state, either from the broker or from storage.
+
+        ``probe`` asks the broker right now. That is the right thing when
+        credentials have just been entered, and the wrong thing for rendering a
+        page: it costs a cold start plus two HTTPS round trips, which is slow
+        enough that the caller gives up and reports "disconnected" while the
+        broker is in fact connected.
+        """
+        if not probe:
+            return self._snapshot(connection_id, user_id)
+
         cache_key = f"{user_id}:{connection_id or ''}"
         if user_id:
             hit = _STATUS_CACHE.get(cache_key)
@@ -148,6 +162,37 @@ class BrokerService:
         result = self._probe_status(connection_id, user_id)
         if user_id:
             _STATUS_CACHE[cache_key] = (dict(result), time.time())
+        return result
+
+    def _snapshot(
+        self, connection_id: Optional[str], user_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """The verdict already recorded, without contacting the broker.
+
+        Cheap and stable, so a page load renders the same answer every time
+        instead of racing a live call it may not wait for.
+        """
+        try:
+            provider, creds, row = self.resolve(connection_id, user_id)
+        except BrokerUnavailable as exc:
+            self._last_error = str(exc)
+            return self._no_connection(str(exc))
+
+        connected = row.get("last_status") == "connected"
+        result: Dict[str, Any] = {
+            "available": connected,
+            "connected": connected,
+            "mode": MODE_LIVE if connected else MODE_UNAVAILABLE,
+            "configured": True,
+            "provider": provider.id,
+            "connection_id": row.get("id"),
+            "warnings": self.warnings_for(provider, creds),
+            "checked_at": row.get("last_checked_at"),
+            "from_storage": True,
+        }
+        reason = row.get("last_error") or ""
+        if reason:
+            result["reason"] = reason
         return result
 
     def _probe_status(

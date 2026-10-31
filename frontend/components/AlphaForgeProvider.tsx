@@ -299,7 +299,13 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         setBrokerCatalogue(catalogue.providers);
         setBrokerVaultReady(Boolean(catalogue.vault_enabled));
       }
-      if (!cancelled) setBrokerState(await api.brokerStatus(sessionToken));
+      // Deliberately not loading broker status here. This effect runs once
+      // with `refresh` as its only dependency, so sessionToken is still the
+      // undefined value from first render — Supabase restores the session
+      // asynchronously. Calling it here fetched an unauthenticated status and
+      // wrote it over the authenticated one as soon as it happened to resolve
+      // later, flipping a connected broker to disconnected. The broker effect
+      // below owns this, and it has the real token.
       if (!cancelled) setReady(true);
     })();
     return () => {
