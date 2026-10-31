@@ -48,8 +48,38 @@ from .base import (
 #: SHA-256 of the empty byte sequence — the body hash for every GET.
 EMPTY_BODY_HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
 
+#: Placeholder only. Exness issues the Gateway per account in Key Management's
+#: DNS widget — there is no single public gateway for all accounts. Keeping a
+#: value here lets the field render an example without pretending it works.
 DEFAULT_GATEWAY = "https://gateway.exness.com"
 SIGN_VERSION = 1
+
+#: What to do about each public auth error, in plain language.
+#:
+#: A bare "401" is not actionable: it covers three distinct failures, each with
+#: a different fix, and the only thing separating them is the error code in the
+#: response body. These are surfaced verbatim so the user is told what to change
+#: rather than merely that something is wrong.
+AUTH_HINTS = {
+    1000: (
+        "AUTH_INVALID_API_KEY — Exness did not recognise this API key. Check you "
+        "copied the whole 'exnsk-…' value with no stray spaces, that it is still "
+        "active in Key Management, and that the account is eligible: the API is "
+        "region-limited and needs an Exness Terminal account (a standard "
+        "MetaTrader account will not work even with correct keys)."
+    ),
+    1001: (
+        "AUTH_INVALID_SIGNATURE — this private key does not belong to that API "
+        "key. Exness shows the private key only once, so if it was not saved "
+        "when the key was created you must generate a fresh key pair and paste "
+        "both halves in together."
+    ),
+    1002: (
+        "AUTH_PERMISSION_DENIED — the key exists but lacks the trading scope. "
+        "Recreate it in Key Management with order and position permissions "
+        "enabled."
+    ),
+}
 
 _HEX_KEY = re.compile(r"^[0-9a-fA-F]{128}$")
 _ACCOUNT_ID = re.compile(r"^[1-9][0-9]*$")
@@ -181,7 +211,11 @@ class ExnessProvider(BrokerProvider):
             key="gateway",
             label="Gateway URL",
             placeholder=DEFAULT_GATEWAY,
-            help="HTTPS Gateway from the DNS widget in Key Management.",
+            help=(
+                "HTTPS Gateway from the DNS widget in Key Management. This is "
+                "issued per account and the example above will not work for "
+                "you — replace it with the exact value Exness shows."
+            ),
             required=False,
         ),
         CredentialField(
@@ -225,9 +259,22 @@ class ExnessProvider(BrokerProvider):
         if cached and (time.time() - cached[1]) < _AP_TTL_SECONDS:
             return cached[0]
 
-        gateway = _base_url(str(creds.get("gateway") or "").strip() or DEFAULT_GATEWAY)
+        supplied = str(creds.get("gateway") or "").strip()
+        gateway = _base_url(supplied or DEFAULT_GATEWAY)
         path = f"/v1/trading/access-point?account_id={account_id}"
-        data = self._request(creds, "GET", gateway, path)
+        try:
+            data = self._request(creds, "GET", gateway, path)
+        except ExnessError as exc:
+            if not supplied:
+                # The user left the field blank, so every failure from here is
+                # really "we guessed the host" — say so instead of blaming keys.
+                raise ExnessError(
+                    f"{exc} — no Gateway URL was given, so the built-in example "
+                    f"({DEFAULT_GATEWAY}) was used. Exness issues the real "
+                    f"Gateway per account in Key Management (DNS widget); paste "
+                    f"that exact value into the Gateway URL field."
+                ) from exc
+            raise
         value = data.get("access_point")
         if not isinstance(value, str) or not value:
             raise ExnessError("Access point discovery returned no access_point.")
@@ -287,20 +334,63 @@ class ExnessProvider(BrokerProvider):
 
     @staticmethod
     def _error_text(response: "httpx.Response", payload: Optional[Dict] = None) -> str:
-        blob: Dict[str, Any] = payload or {}
+        """Turn an Exness error response into something a human can act on.
+
+        Reports the public code whenever one is present and attaches the
+        matching fix from :data:`AUTH_HINTS`. When the body carries no code —
+        a 401 with an empty body, typically — it says the likely cause instead
+        of returning a blank message.
+        """
+        blob: Dict[str, Any] = {}
         try:
-            blob = payload or response.json()
+            blob = payload or response.json() or {}
         except ValueError:
             blob = {}
-        error = blob.get("error") or {}
+        if not isinstance(blob, dict):
+            blob = {}
+
+        raw_error = blob.get("error")
+        error = raw_error if isinstance(raw_error, dict) else {}
         code = error.get("code") or blob.get("code")
         message = (
             error.get("error_message")
             or blob.get("error_message")
             or blob.get("message")
-            or response.text[:200]
+            or ""
         )
-        return f"Exness {response.status_code}" + (f" ({code})" if code else "") + f": {message}"
+        body = (response.text or "").strip()[:200]
+
+        try:
+            code_int = int(code) if code is not None else None
+        except (TypeError, ValueError):
+            code_int = None
+
+        head = f"Exness {response.status_code}"
+        if code is not None:
+            head += f" ({code})"
+        if message:
+            head += f": {message}"
+
+        parts = [head]
+        hint = AUTH_HINTS.get(code_int) if code_int is not None else None
+        if hint:
+            parts.append(hint)
+        elif response.status_code == 401:
+            # No parsable code. An empty 401 body usually means we reached the
+            # wrong host entirely, not that the key is wrong.
+            parts.append(
+                "The Gateway URL is probably wrong. Exness issues a per-account "
+                "HTTPS Gateway in Key Management (DNS widget) and there is no "
+                "public default — paste the exact value shown there."
+            )
+        elif response.status_code == 403:
+            parts.append(
+                "The key authenticated but is not allowed to do this. Check its "
+                "scopes in Key Management."
+            )
+        if body and not message:
+            parts.append(f"Response: {body}")
+        return " — ".join(parts)
 
     # ------------------------------------------------------------------
     # account

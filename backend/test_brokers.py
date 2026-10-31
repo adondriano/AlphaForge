@@ -22,7 +22,13 @@ from services.broker_vault import (
     public_row,
 )
 from services.brokers.base import instrument_class, shadow_fill
-from services.brokers.exness import ExnessProvider, load_signing_key, sign_headers
+from services.brokers.exness import (
+    DEFAULT_GATEWAY,
+    ExnessError,
+    ExnessProvider,
+    load_signing_key,
+    sign_headers,
+)
 
 # ---------------------------------------------------------------------------
 # Exness signing — official test vector (RFC 8032 Test 1 public test key)
@@ -331,3 +337,130 @@ def test_unsupported_symbol_is_halted_not_shadowed(monkeypatch):
     )
     assert result["mode"] == "halted"
     assert "indices" in result["reason"]
+
+
+# ---------------------------------------------------------------------------
+# Exness error diagnostics
+#
+# A bare "401" tells the user nothing. These pin the behaviour that turns an
+# Exness error response into a specific, actionable next step.
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    """Just enough of httpx.Response for ``_error_text``."""
+
+    def __init__(self, status_code: int, body: str = "", payload=None):
+        self.status_code = status_code
+        self.text = body
+        self._payload = payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("no json")
+        return self._payload
+
+
+def _error(status_code: int, body: str = "", payload=None) -> str:
+    return ExnessProvider._error_text(_FakeResponse(status_code, body, payload))
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        (1000, "AUTH_INVALID_API_KEY"),
+        (1001, "AUTH_INVALID_SIGNATURE"),
+        (1002, "AUTH_PERMISSION_DENIED"),
+    ],
+)
+def test_auth_codes_are_named_and_explained(code, expected):
+    """Each public auth code must surface its name and what to change."""
+    text = _error(401, payload={"error": {"code": code, "error_message": "nope"}})
+
+    assert str(code) in text, f"code {code} missing from {text!r}"
+    assert expected in text, f"expected {expected} in {text!r}"
+    assert "nope" in text
+
+
+def test_auth_hint_distinguishes_the_three_failures():
+    """The three 401s need three different fixes, so they must not read alike."""
+    messages = {
+        code: _error(401, payload={"error": {"code": code}})
+        for code in (1000, 1001, 1002)
+    }
+    assert len(set(messages.values())) == 3
+
+    assert "region-limited" in messages[1000]
+    assert "private key" in messages[1001]
+    assert "scope" in messages[1002]
+
+
+def test_bare_401_blames_the_gateway_not_the_key():
+    """An empty 401 body means we reached the wrong host, not a bad key."""
+    text = _error(401)
+
+    assert "Exness 401" in text
+    assert "Gateway URL" in text
+    assert "no public default" in text
+
+
+def test_401_with_unparsable_body_still_gives_guidance():
+    text = _error(401, body="<html>unauthorized</html>")
+
+    assert "Gateway URL" in text
+    assert "unauthorized" in text
+
+
+def test_403_mentions_scopes():
+    text = _error(403, payload={"error": {"code": 1002}})
+    assert "scope" in text
+
+
+def test_code_is_reported_when_present_without_a_message():
+    text = _error(401, payload={"error": {"code": 1001}})
+    assert "(1001)" in text
+
+
+def test_missing_gateway_is_called_out_on_discovery_failure(monkeypatch):
+    """Blank Gateway URL + failure => say the default is only an example."""
+    provider = ExnessProvider()
+
+    def boom(*args, **kwargs):
+        raise ExnessError("Exness 401")
+
+    monkeypatch.setattr(provider, "_request", boom)
+    monkeypatch.delenv("EXNESS_TEST", raising=False)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._access_point(creds)
+
+    message = str(excinfo.value)
+    assert "Gateway URL" in message
+    assert "gateway.exness.com" in message
+    assert "Key Management" in message
+
+
+def test_supplied_gateway_failure_does_not_blame_the_default(monkeypatch):
+    """When the user did supply a gateway, don't second-guess it."""
+    provider = ExnessProvider()
+
+    def boom(*args, **kwargs):
+        raise ExnessError("Exness 401")
+
+    monkeypatch.setattr(provider, "_request", boom)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mine.example.com",
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._access_point(creds)
+
+    assert "No Gateway URL" not in str(excinfo.value)
+    assert "built-in example" not in str(excinfo.value)
