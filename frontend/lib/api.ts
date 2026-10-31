@@ -22,7 +22,42 @@ import type {
   Strategy,
 } from "./types";
 
-export const API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/$/, "");
+/**
+ * Build-time engine location. `NEXT_PUBLIC_*` is baked into the bundle, so a
+ * hosted deployment can only ever talk to the engine it was built with — which
+ * is useless when the engine sits on your own Windows box next to MetaTrader 5.
+ * `ENGINE_URL` (Settings tab) overrides it at runtime and is what makes the
+ * local-terminal setup work without a redeploy.
+ */
+export const ENV_API_URL = (process.env.NEXT_PUBLIC_API_URL ?? "").replace(/\/+$/, "");
+
+let runtimeUrl: string | null = null;
+const urlListeners = new Set<(url: string) => void>();
+
+export function apiUrl(): string {
+  const override = (runtimeUrl ?? "").trim().replace(/\/+$/, "");
+  return override || ENV_API_URL;
+}
+
+export function onApiUrl(listener: (url: string) => void): () => void {
+  urlListeners.add(listener);
+  return () => urlListeners.delete(listener);
+}
+
+/** Point the studio at a (possibly tunnelled) Python engine. Pass "" to reset. */
+export function setApiUrl(next: string | null): string {
+  setApiUrlSilent(next);
+  void refreshEngineStatus();
+  return apiUrl();
+}
+
+/** Same as `setApiUrl` but without triggering a health probe (startup path). */
+export function setApiUrlSilent(next: string | null): void {
+  const value = (next ?? "").trim().replace(/\/+$/, "");
+  if (value === runtimeUrl) return;
+  runtimeUrl = value;
+  urlListeners.forEach((listener) => listener(apiUrl()));
+}
 
 export type EngineStatus = {
   mode: "python" | "local";
@@ -38,9 +73,9 @@ export type EngineStatus = {
 };
 
 let status: EngineStatus = {
-  mode: API_URL ? "python" : "local",
+  mode: apiUrl() ? "python" : "local",
   reachable: false,
-  label: API_URL ? "Python engine · checking" : "In-browser engine",
+  label: apiUrl() ? "Python engine · checking" : "In-browser engine",
 };
 
 const statusListeners = new Set<(status: EngineStatus) => void>();
@@ -60,11 +95,11 @@ function setStatus(next: EngineStatus) {
 }
 
 async function request<T>(path: string, body: unknown, timeoutMs = 20000): Promise<T> {
-  if (!API_URL) throw new Error("no api url");
+  if (!apiUrl()) throw new Error("no api url");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${API_URL}${path}`, {
+    const response = await fetch(`${apiUrl()}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body ?? {}),
@@ -80,11 +115,11 @@ async function request<T>(path: string, body: unknown, timeoutMs = 20000): Promi
 }
 
 async function get<T>(path: string, timeoutMs = 8000): Promise<T> {
-  if (!API_URL) throw new Error("no api url");
+  if (!apiUrl()) throw new Error("no api url");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(`${API_URL}${path}`, { signal: controller.signal });
+    const response = await fetch(`${apiUrl()}${path}`, { signal: controller.signal });
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return (await response.json()) as T;
   } finally {
@@ -93,12 +128,13 @@ async function get<T>(path: string, timeoutMs = 8000): Promise<T> {
 }
 
 export async function refreshEngineStatus(): Promise<EngineStatus> {
-  if (!API_URL) {
+  if (!apiUrl()) {
     setStatus({
       mode: "local",
       reachable: false,
       label: "In-browser engine",
-      detail: "NEXT_PUBLIC_API_URL is not set — the TypeScript engine is running in your browser.",
+      detail:
+        "No Python engine configured — set Engine URL in Settings (or NEXT_PUBLIC_API_URL at build time). The TypeScript engine is running in your browser until then.",
     });
     return status;
   }
@@ -119,7 +155,7 @@ export async function refreshEngineStatus(): Promise<EngineStatus> {
       mode: "local",
       reachable: false,
       label: "In-browser engine",
-      detail: `Python engine unreachable at ${API_URL} — using the local TypeScript engine.`,
+      detail: `Python engine unreachable at ${apiUrl()} — using the local TypeScript engine.`,
     });
   }
   return status;
@@ -150,7 +186,7 @@ export async function transpile(input: {
   timeframe?: string;
 }): Promise<TranspileResponse> {
   const text = input.transcript?.trim() ? input.transcript : input.text;
-  if (API_URL) {
+  if (apiUrl()) {
     try {
       const response = await request<{
         spec: TranspileResult;
@@ -200,7 +236,7 @@ export async function backtest(
   strategy: Strategy,
   options: BacktestOptions = {},
 ): Promise<BacktestResult> {
-  if (API_URL) {
+  if (apiUrl()) {
     try {
       const response = await request<BacktestResult>(
         "/api/strategies/backtest",
@@ -261,7 +297,7 @@ export async function optimizeStrategy(
   strategy: Strategy,
   options: OptimizeOptions = {},
 ): Promise<OptimizeResult> {
-  if (API_URL) {
+  if (apiUrl()) {
     try {
       const response = await request<{
         optimization: { version: number; engine: string };
@@ -326,7 +362,7 @@ export async function analyze(
   strategy: Strategy,
   options: AnalyzeOptions,
 ): Promise<AnalysisReport> {
-  if (API_URL) {
+  if (apiUrl()) {
     try {
       const response = await request<AnalysisReport>(
         "/api/strategies/analyze/compute",
@@ -384,7 +420,7 @@ export async function analyze(
 /* -------------------------------------------------------------------------- */
 
 export async function pushSettings(settings: AppSettings): Promise<boolean> {
-  if (!API_URL) return false;
+  if (!apiUrl()) return false;
   try {
     await request("/api/settings", settings, 8000);
     return true;
@@ -394,7 +430,7 @@ export async function pushSettings(settings: AppSettings): Promise<boolean> {
 }
 
 export async function fetchSettings(): Promise<Partial<AppSettings> | null> {
-  if (!API_URL) return null;
+  if (!apiUrl()) return null;
   try {
     return await get<{ settings: Partial<AppSettings> }>("/api/settings", 8000).then(
       (payload) => payload.settings ?? null,
@@ -418,9 +454,9 @@ export const MT5_UNAVAILABLE: Mt5Status = {
   mode: "unavailable",
   configured: false,
   reason:
-    API_URL
+    apiUrl()
       ? "The Python engine is unreachable. Start it locally (`uvicorn main:app --port 8000`) on the machine that has MetaTrader 5 installed."
-      : "NEXT_PUBLIC_API_URL is not set. Live quotes require the local Python engine running beside MetaTrader 5 — MetaTrader 5 cannot be reached from a hosted deployment.",
+      : "No Python engine configured. Live quotes need the local Python engine running on the machine that has MetaTrader 5 — set Engine URL in Settings and connect it.",
 };
 
 export interface Mt5Credentials {
@@ -432,7 +468,7 @@ export interface Mt5Credentials {
 }
 
 export async function mt5Status(): Promise<Mt5Status> {
-  if (!API_URL) return MT5_UNAVAILABLE;
+  if (!apiUrl()) return MT5_UNAVAILABLE;
   try {
     return await get<Mt5Status>("/api/mt5/status", 8000);
   } catch {
@@ -444,7 +480,7 @@ export async function mt5Status(): Promise<Mt5Status> {
 export async function mt5Connect(
   credentials: Mt5Credentials = {},
 ): Promise<Mt5Status & { reason?: string }> {
-  if (!API_URL) return MT5_UNAVAILABLE;
+  if (!apiUrl()) return MT5_UNAVAILABLE;
   const outcome = await request<{ connected: boolean; reason?: string; status?: Mt5Status }>(
     "/api/mt5/connect",
     credentials,
@@ -454,7 +490,7 @@ export async function mt5Connect(
 }
 
 export async function mt5Disconnect(): Promise<Mt5Status> {
-  if (!API_URL) return MT5_UNAVAILABLE;
+  if (!apiUrl()) return MT5_UNAVAILABLE;
   try {
     const outcome = await request<{ status?: Mt5Status }>("/api/mt5/disconnect", {}, 15000);
     return outcome.status ?? MT5_UNAVAILABLE;
@@ -464,7 +500,7 @@ export async function mt5Disconnect(): Promise<Mt5Status> {
 }
 
 export async function mt5Price(symbol: string): Promise<Mt5Quote> {
-  if (!API_URL) {
+  if (!apiUrl()) {
     return { available: false, symbol, reason: MT5_UNAVAILABLE.reason };
   }
   try {
@@ -479,7 +515,7 @@ export async function mt5Candles(
   timeframe = "H1",
   count = 120,
 ): Promise<Mt5CandleSeries> {
-  if (!API_URL) {
+  if (!apiUrl()) {
     return {
       available: false,
       symbol,
@@ -506,7 +542,7 @@ export async function mt5Candles(
 }
 
 export async function mt5Symbols(needle = ""): Promise<string[]> {
-  if (!API_URL) return [];
+  if (!apiUrl()) return [];
   try {
     const outcome = await get<{ available: boolean; symbols: string[] }>(
       `/api/mt5/symbols?needle=${encodeURIComponent(needle)}`,
@@ -523,7 +559,7 @@ export async function mt5Symbols(needle = ""): Promise<string[]> {
 /* -------------------------------------------------------------------------- */
 
 export async function resetEngine(user_id?: string | null): Promise<boolean> {
-  if (!API_URL) return false;
+  if (!apiUrl()) return false;
   try {
     await request<{ removed: number }>("/api/reset", { user_id, scope: "user" }, 30000);
     return true;

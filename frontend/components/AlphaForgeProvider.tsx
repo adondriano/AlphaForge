@@ -271,6 +271,9 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
     (async () => {
       const stored = loadSettings();
       if (!cancelled) setSettings(stored);
+      // A runtime Engine URL (Settings tab) wins over the build-time env var —
+      // this is how a hosted dashboard reaches an engine on your own machine.
+      api.setApiUrlSilent(stored.ENGINE_URL ?? "");
       dataStore.ensureChannel();
       await refresh();
       const status = await api.refreshEngineStatus();
@@ -398,6 +401,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       if (!requireAccount("Changing settings")) return;
       const next = saveSettings({ ...settingsRef.current, ...patch });
       setSettings(next);
+      if (patch.ENGINE_URL !== undefined) api.setApiUrl(next.ENGINE_URL);
       const supabaseChanged =
         patch.NEXT_PUBLIC_SUPABASE_URL !== undefined ||
         patch.NEXT_PUBLIC_SUPABASE_ANON_KEY !== undefined;

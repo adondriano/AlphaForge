@@ -153,14 +153,24 @@ Python engine):
 
 | Group | Keys |
 | --- | --- |
+| Python engine | `ENGINE_URL` — runtime location of the engine; overrides `NEXT_PUBLIC_API_URL` |
 | Supabase | `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` |
-| Execution | `MT5_PATH`, `MT5_LOGIN`, `MT5_SERVER` |
+| Execution | `MT5_PATH`, `MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` |
 | LLM | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OLLAMA_URL`, `OLLAMA_MODEL` |
 | Prop-firm limits | `MAX_DAILY_DRAWDOWN` (3.5), `MAX_TOTAL_DRAWDOWN` (5.0), `RISK_PER_TRADE_PCT` (0.5), `MAX_CONCURRENT_TRADES` (2), `BEST_DAY_PROFIT_CAP_PCT`, `EMERGENCY_LIQUIDATE_ON_BREACH` |
 | Engine | `DEFAULT_SYMBOL`, `DEFAULT_TIMEFRAME`, `BACKTEST_BARS`, `OPTIMIZER_TRIALS`, `AUTONOMOUS_DEFAULT` |
 
 Resolution order: **Settings tab → environment variable → default**. Secrets are never written to
 browser storage; they live in memory for the session and in server-side env vars in production.
+
+### 🔌 Connecting a local MetaTrader 5 terminal
+
+`MetaTrader5` is a Windows-only C extension that attaches to a terminal on the *same* machine, so
+the Python engine has to run on your Windows PC next to MT5 — a hosted deployment can never reach
+it. See **[`docs/CONNECTING-MT5.md`](docs/CONNECTING-MT5.md)** for the full step-by-step guide:
+installing the bridge, enabling Algo Trading, filling in `MT5_PATH` / `MT5_LOGIN` /
+`MT5_PASSWORD` / `MT5_SERVER`, and pointing the dashboard at your engine (locally, or through an
+HTTPS tunnel).
 
 ---
 

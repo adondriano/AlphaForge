@@ -16,6 +16,8 @@ from typing import Any, Dict
 from pydantic import BaseModel, Field
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
+    # ---- Engine location (frontend only; harmless here) ------------------
+    "ENGINE_URL": "",
     # ---- Supabase -------------------------------------------------------
     "NEXT_PUBLIC_SUPABASE_URL": "",
     "NEXT_PUBLIC_SUPABASE_ANON_KEY": "",
@@ -51,6 +53,7 @@ SECRET_KEYS = {"SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "MT5_PASSWORD"}
 class SettingsUpdate(BaseModel):
     """Partial settings patch. ``null`` values are ignored (not cleared)."""
 
+    ENGINE_URL: str | None = None
     NEXT_PUBLIC_SUPABASE_URL: str | None = None
     NEXT_PUBLIC_SUPABASE_ANON_KEY: str | None = None
     SUPABASE_SERVICE_ROLE_KEY: str | None = None
@@ -80,6 +83,7 @@ class SettingsUpdate(BaseModel):
 class Settings(BaseModel):
     """Runtime view of every knob AlphaForge exposes."""
 
+    ENGINE_URL: str = ""
     NEXT_PUBLIC_SUPABASE_URL: str = ""
     NEXT_PUBLIC_SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""

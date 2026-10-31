@@ -375,6 +375,12 @@ export interface PaperStats {
 }
 
 export interface AppSettings {
+  /**
+   * Runtime location of the Python engine. Overrides the build-time
+   * `NEXT_PUBLIC_API_URL`, which is what lets a hosted dashboard reach the
+   * engine running beside your MetaTrader 5 terminal.
+   */
+  ENGINE_URL: string;
   NEXT_PUBLIC_SUPABASE_URL: string;
   NEXT_PUBLIC_SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
@@ -400,6 +406,7 @@ export interface AppSettings {
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
+  ENGINE_URL: "",
   NEXT_PUBLIC_SUPABASE_URL: "",
   NEXT_PUBLIC_SUPABASE_ANON_KEY: "",
   SUPABASE_SERVICE_ROLE_KEY: "",

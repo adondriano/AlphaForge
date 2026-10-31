@@ -17,6 +17,7 @@ import {
   ShieldCheck,
   Terminal,
   Trash2,
+  Zap,
 } from "lucide-react";
 
 import { useAlphaForge } from "./AlphaForgeProvider";
@@ -26,6 +27,9 @@ import { SYMBOLS, TIMEFRAMES } from "@/lib/types";
 import { llmProvider } from "@/lib/settings";
 
 type FieldKey = keyof AppSettings;
+
+const MT5_GUIDE_URL =
+  "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-MT5.md";
 
 const GROUPS: {
   title: string;
@@ -40,6 +44,20 @@ const GROUPS: {
     hint?: string;
   }[];
 }[] = [
+  {
+    title: "Python engine",
+    icon: <Zap size={15} />,
+    description:
+      "Where the FastAPI engine lives. This overrides NEXT_PUBLIC_API_URL at runtime, so you can point a hosted dashboard at the engine running on your own machine. Leave it blank to use the in-browser TypeScript engine.",
+    fields: [
+      {
+        key: "ENGINE_URL",
+        label: "ENGINE_URL",
+        placeholder: "http://localhost:8000",
+        hint: "Base URL only — no /api suffix. If you open AlphaForge over HTTPS (the hosted site), this must be HTTPS too, otherwise the browser blocks it as mixed content. Use a tunnel (cloudflared / ngrok) and paste its https:// URL here.",
+      },
+    ],
+  },
   {
     title: "Supabase",
     icon: <Database size={15} />,
@@ -187,7 +205,9 @@ export default function SettingsTab() {
           label="Compute engine"
           value={engineStatus.label}
           tone={engineStatus.mode === "python" ? "mint" : "cyan"}
-          detail={engineStatus.detail ?? ""}
+          detail={`${engineStatus.detail ?? ""}${
+            engineStatus.detail ? " " : ""
+          }Target: ${settings.ENGINE_URL?.trim() || "not set (in-browser engine)"}`}
         />
         <Status
           label="LLM provider"
@@ -296,7 +316,15 @@ export default function SettingsTab() {
               {" "}
               <span className="text-white/55">Engine says: {mt5Status.reason}</span>
             </>
-          ) : null}
+          ) : null}{" "}
+          <a
+            href={MT5_GUIDE_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-forge-cyan underline decoration-dotted underline-offset-2 hover:text-white"
+          >
+            Full step-by-step setup guide →
+          </a>
         </p>
         {mt5Connected && mt5Status?.account ? (
           <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
