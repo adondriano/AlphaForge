@@ -280,7 +280,7 @@ export interface RiskDecision {
   breach?: string | null;
 }
 
-export type Mt5Mode = "live" | "shadow" | "unavailable";
+export type Mt5Mode = "live" | "shadow" | "unavailable" | "relay";
 
 export interface Mt5Status {
   available: boolean;
@@ -314,6 +314,17 @@ export interface Mt5Status {
     server: boolean;
     path: boolean;
   } | null;
+  /**
+   * Present when the answer came from `bridge_agent.py` on the user's Windows
+   * machine rather than from a terminal attached to this process. The hosted
+   * engine can never import MetaTrader5, so this is the normal live path there.
+   */
+  relay?: {
+    id: string;
+    name: string;
+    last_seen: string | null;
+    age_seconds: number | null;
+  } | null;
 }
 
 export interface Mt5Quote {
@@ -328,6 +339,10 @@ export interface Mt5Quote {
   time?: number;
   server_time?: string;
   reason?: string;
+  /** Seconds since the bridge agent pushed this tick. */
+  quote_age_seconds?: number;
+  /** "relay" when the quote travelled through Supabase from the agent. */
+  via?: string;
 }
 
 export interface Mt5Candle {

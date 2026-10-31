@@ -31,6 +31,9 @@ type FieldKey = keyof AppSettings;
 const MT5_GUIDE_URL =
   "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-MT5.md";
 
+const MT5_AGENT_GUIDE_URL =
+  "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-MT5.md#path-c--bridge-agent-keep-the-engine-on-vercel";
+
 const GROUPS: {
   title: string;
   icon: React.ReactNode;
@@ -306,10 +309,17 @@ export default function SettingsTab() {
           <h3 className="text-sm font-semibold text-white">MetaTrader 5 bridge</h3>
           <Badge tone={mt5Tone}>{mt5Connected ? "connected" : "disconnected"}</Badge>
           <Badge tone="neutral">{mt5Status?.mode ?? "shadow"}</Badge>
+          {mt5Status?.relay ? (
+            <Badge tone="cyan" title={`Last heartbeat ${mt5Status.relay.age_seconds ?? "?"}s ago`}>
+              via bridge · {mt5Status.relay.name}
+            </Badge>
+          ) : null}
         </div>
         <p className="mb-4 text-[12px] leading-relaxed text-white/40">
           {mt5Connected
-            ? "Live quotes and order routing are active through the Python engine."
+            ? mt5Status?.relay
+              ? `Live quotes and order routing are relayed over Supabase by the bridge agent "${mt5Status.relay.name}" running next to your terminal.`
+              : "Live quotes and order routing are active through the Python engine."
             : "Fill in MT5_PATH, MT5_LOGIN, MT5_SERVER and MT5_PASSWORD, run the Python engine on the Windows machine that hosts your terminal, then connect. Until then every fill is simulated locally so the studio stays fully usable."}
           {mt5Status?.reason ? (
             <>
@@ -324,6 +334,14 @@ export default function SettingsTab() {
             className="text-forge-cyan underline decoration-dotted underline-offset-2 hover:text-white"
           >
             Full step-by-step setup guide →
+          </a>{" "}
+          <a
+            href={MT5_AGENT_GUIDE_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="text-forge-violet underline decoration-dotted underline-offset-2 hover:text-white"
+          >
+            Bridge agent (keeps the engine on Vercel) →
           </a>
         </p>
         {mt5Connected && mt5Status?.account ? (

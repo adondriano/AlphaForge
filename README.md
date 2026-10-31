@@ -88,6 +88,7 @@ psql "$DATABASE_URL" -f backend/schema.sql
 | `optimizations` | Immutable parameter versions. Unique `(strategy_id, version)` plus a partial unique index guaranteeing exactly one active version per strategy. |
 | `trade_logs` | Shadow / paper / live executions with the full Prop-Firm Shield audit trail (`day_pnl_pct`, `total_pnl_pct`, `blocked_reason`). |
 | `app_settings` | Single-row settings document persisted from the Settings tab. |
+| `mt5_bridges` / `mt5_quotes` / `mt5_candles` / `mt5_commands` | Windows-side bridge agent relay (Path C). Service-role only — no anon or authenticated policy. |
 
 All four tables are added to the `supabase_realtime` publication with `REPLICA IDENTITY FULL`, and
 row level security is enabled with single-tenant permissive policies (tighten these before exposing
@@ -166,11 +167,19 @@ browser storage; they live in memory for the session and in server-side env vars
 ### 🔌 Connecting a local MetaTrader 5 terminal
 
 `MetaTrader5` is a Windows-only C extension that attaches to a terminal on the *same* machine, so
-the Python engine has to run on your Windows PC next to MT5 — a hosted deployment can never reach
-it. See **[`docs/CONNECTING-MT5.md`](docs/CONNECTING-MT5.md)** for the full step-by-step guide:
-installing the bridge, enabling Algo Trading, filling in `MT5_PATH` / `MT5_LOGIN` /
-`MT5_PASSWORD` / `MT5_SERVER`, and pointing the dashboard at your engine (locally, or through an
-HTTPS tunnel).
+a hosted deployment can never reach it directly. AlphaForge supports three ways to close that gap —
+see **[`docs/CONNECTING-MT5.md`](docs/CONNECTING-MT5.md)** for the full step-by-step guide:
+
+| Path | Runs on your Windows PC | Engine location |
+| --- | --- | --- |
+| **A — local** | Engine + dashboard | your PC |
+| **B — tunnel** | Engine, exposed over HTTPS | your PC |
+| **C — bridge agent** | `backend/bridge_agent.py` only | stays on Vercel |
+
+Path C is the relay: the agent imports `MetaTrader5`, pushes quotes into `mt5_quotes` and answers
+work from `mt5_commands`, while the hosted engine drives it over Supabase. No tunnel, no public URL,
+and it works behind CGNAT. `mt5_commands` is service-role-only — it carries order instructions, so
+no anon or authenticated policy exists for it.
 
 ---
 

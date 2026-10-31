@@ -108,6 +108,11 @@ def _apply_settings_patch(patch: Dict[str, Any]) -> Settings:
 
 def _configure_store(settings: Settings) -> None:
     store.configure(settings.NEXT_PUBLIC_SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+    # The MT5 relay talks to the same project, but with the service-role key so
+    # it can reach the (deliberately anon-denied) bridge tables.
+    mt5_executor.relay.configure(
+        settings.NEXT_PUBLIC_SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY
+    )
 
 
 def _roll_day() -> None:
@@ -454,6 +459,19 @@ def health() -> Dict[str, Any]:
                          (settings.OLLAMA_MODEL if settings.ollama_reachable_url else None),
             },
             "mt5": mt5_executor.bridge.status(settings),
+            "mt5_relay": {
+                "enabled": mt5_executor.relay.enabled,
+                "error": mt5_executor.relay.last_error,
+                "bridges": [
+                    {
+                        "id": b.get("id"),
+                        "name": b.get("name"),
+                        "status": b.get("status"),
+                        "age_seconds": b.get("_age_seconds"),
+                    }
+                    for b in mt5_executor.relay.active_bridges()
+                ],
+            },
         },
         "risk": {
             **_shield().to_dict(),

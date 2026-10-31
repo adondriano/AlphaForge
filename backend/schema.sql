@@ -141,6 +141,93 @@ create index if not exists trade_logs_strategy_idx  on public.trade_logs (strate
 create index if not exists trade_logs_opened_idx    on public.trade_logs (opened_at desc);
 
 -- -----------------------------------------------------------------------------
+-- MT5 bridge relay
+--
+-- MetaTrader5 is a Windows-only C extension that attaches to a terminal on the
+-- same machine, so a hosted engine can never import it. The relay closes that
+-- gap: a small agent (`backend/bridge_agent.py`) runs on the Windows box next
+-- to the terminal, pushes quotes into `mt5_quotes` and answers commands from
+-- `mt5_commands`. The engine then uses those tables instead of the MT5 API.
+--
+-- These four tables are SERVICE-ROLE ONLY. `mt5_commands` in particular carries
+-- order instructions — a publicly readable queue would let anyone who knows the
+-- Supabase URL place trades on the account, so no anon/authenticated policy is
+-- created at all and RLS denies them by default.
+-- -----------------------------------------------------------------------------
+create table if not exists public.mt5_bridges (
+  id           text primary key,
+  name         text        not null default '',
+  status       text        not null default 'offline'
+               check (status in ('online','connected','offline','error')),
+  last_seen    timestamptz not null default now(),
+  account      jsonb       not null default '{}'::jsonb,
+  terminal     jsonb       not null default '{}'::jsonb,
+  symbols      jsonb       not null default '[]'::jsonb,
+  error        text,
+  user_id      uuid        references auth.users(id) on delete cascade,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+create index if not exists mt5_bridges_last_seen_idx on public.mt5_bridges (last_seen desc);
+
+create table if not exists public.mt5_quotes (
+  bridge_id    text        not null references public.mt5_bridges(id) on delete cascade,
+  symbol       text        not null,
+  bid          numeric(18,6) not null default 0,
+  ask          numeric(18,6) not null default 0,
+  last         numeric(18,6) not null default 0,
+  spread       numeric(18,6) not null default 0,
+  digits       integer       not null default 5,
+  volume       numeric(18,4) not null default 0,
+  tick_time    bigint        not null default 0,
+  updated_at   timestamptz   not null default now(),
+  primary key (bridge_id, symbol)
+);
+
+create table if not exists public.mt5_candles (
+  bridge_id    text        not null references public.mt5_bridges(id) on delete cascade,
+  symbol       text        not null,
+  timeframe    text        not null,
+  digits       integer     not null default 5,
+  candles      jsonb       not null default '[]'::jsonb,
+  updated_at   timestamptz not null default now(),
+  primary key (bridge_id, symbol, timeframe)
+);
+
+create table if not exists public.mt5_commands (
+  id           uuid primary key default gen_random_uuid(),
+  bridge_id    text        not null references public.mt5_bridges(id) on delete cascade,
+  kind         text        not null
+               check (kind in ('connect','disconnect','status','price','candles','symbols','place_order')),
+  payload      jsonb       not null default '{}'::jsonb,
+  status       text        not null default 'pending'
+               check (status in ('pending','processing','done','error','expired')),
+  result       jsonb,
+  error        text,
+  created_at   timestamptz not null default now(),
+  claimed_at   timestamptz,
+  completed_at timestamptz,
+  expires_at   timestamptz not null default (now() + interval '120 seconds')
+);
+
+create index if not exists mt5_commands_pending_idx
+  on public.mt5_commands (bridge_id, created_at)
+  where status = 'pending';
+
+drop trigger if exists mt5_bridges_set_updated_at on public.mt5_bridges;
+create trigger mt5_bridges_set_updated_at
+  before update on public.mt5_bridges
+  for each row execute function public.set_updated_at();
+
+alter table public.mt5_bridges  enable row level security;
+alter table public.mt5_quotes   enable row level security;
+alter table public.mt5_candles  enable row level security;
+alter table public.mt5_commands enable row level security;
+
+-- Deliberately no anon/authenticated policies: service_role only.
+
+-- -----------------------------------------------------------------------------
 -- app_settings — single-row settings document (Settings tab persistence)
 -- -----------------------------------------------------------------------------
 create table if not exists public.app_settings (
@@ -237,7 +324,7 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['strategies','optimizations','trade_logs','app_settings'] loop
+  foreach t in array array['strategies','optimizations','trade_logs','app_settings','mt5_bridges','mt5_quotes'] loop
     if not exists (
       select 1 from pg_publication_tables
       where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = t

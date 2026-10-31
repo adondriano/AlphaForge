@@ -39,6 +39,14 @@ That message is accurate, and the reason is architectural — not a bug:
 Everything else in AlphaForge — backtests, the optimizer, the analyst, lineage,
 paper trading — works without any of this. Live price and real order routing do not.
 
+**There are three ways to close the gap**, all documented below:
+
+| Path | What runs where | Best for |
+| --- | --- | --- |
+| **A — everything local** (§3) | Engine *and* dashboard on the Windows PC | Simplest, most reliable, zero exposure |
+| **B — tunnel** (§4) | Engine on the PC, hosted dashboard, linked by an HTTPS tunnel | Keeping the hosted UI with no new code |
+| **C — bridge agent** (§5) | Engine stays on Vercel; only `bridge_agent.py` runs on the PC and relays over Supabase | Hosting the engine *and* getting live MT5 — no tunnel, no public URL |
+
 ---
 
 ## 1. What you need
@@ -322,7 +330,130 @@ Mitigations, in order of preference:
 
 ---
 
-## 5. Setting it up permanently (optional)
+## 5. Path C — bridge agent (keep the engine on Vercel)
+
+This is the answer to "the engine is on Vercel, MT5 is on my PC — bridge them".
+You run one small Python process on the Windows machine and the hosted engine
+drives your terminal through Supabase. No tunnel, no port forwarding, no public
+URL, and it works behind CGNAT.
+
+### How it works
+
+```
+Windows PC (yours)                      Supabase                    Vercel engine
+┌───────────────────────┐   pushes    ┌───────────────┐   reads   ┌──────────────┐
+│ bridge_agent.py       │  quotes ──► │ mt5_quotes    │ ────────► │ mt5_executor │
+│  · imports MetaTrader5 │             │ mt5_candles   │           │  relay mode  │
+│  · heartbeat every 5s  │             │ mt5_bridges   │           └──────┬───────┘
+│  · answers commands    │ ◄── work ── │ mt5_commands  │ ◄────────────────┘
+└───────────────────────┘             └───────────────┘
+```
+
+- The agent registers itself in `mt5_bridges` and refreshes `last_seen` every
+  `ALPHAFORGE_HEARTBEAT_SECONDS` (default 5). A bridge with no heartbeat for 45s
+  is treated as offline.
+- It pushes a tick for every symbol in `ALPHAFORGE_QUOTE_SYMBOLS` on each poll,
+  so `price` reads a cached row and feels instant. Missing or stale quotes fall
+  back to a command round-trip.
+- Connect, disconnect, candles, the symbol list and **orders** go through
+  `mt5_commands`: the engine writes a row and waits; the agent claims it, runs it
+  against MT5, writes the result back, and deletes the row. If nothing answers in
+  time the engine shadow-fills, exactly as it does today.
+- Every relayed response carries `"via": "relay"`, and the Settings panel shows a
+  **via bridge · &lt;machine&gt;** badge, so you always know where a number came from.
+
+### Step C1 — Do Path A steps A1–A4 on the Windows PC
+
+Same Python setup: venv, `pip install -r requirements-dev.txt`, and
+`pip install MetaTrader5==5.0.45`. You do **not** run `uvicorn` for this path —
+the agent replaces the local engine.
+
+### Step C2 — Install the agent's extra dependency
+
+```powershell
+cd backend
+.\.venv\Scripts\Activate.ps1
+pip install supabase
+```
+
+### Step C3 — Point the agent at your Supabase project
+
+```powershell
+$env:SUPABASE_URL              = "https://klapzqwpspehrefeacxg.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY = "<your service role key>"
+$env:MT5_LOGIN                 = "12345678"
+$env:MT5_PASSWORD              = "your-terminal-password"
+$env:MT5_SERVER                = "Broker-Demo"
+```
+
+The service-role key comes from **Supabase → Project Settings → API keys**. It
+bypasses row level security, which is required here because the bridge tables
+deliberately deny the anon key. Keep it out of source control.
+
+Optional tuning:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ALPHAFORGE_BRIDGE_ID` | `agent-<random>` | Stable id; set it if you want a recognisable one |
+| `ALPHAFORGE_BRIDGE_NAME` | your hostname | Shown in the **via bridge** badge |
+| `ALPHAFORGE_HEARTBEAT_SECONDS` | `5` | How often the agent re-registers |
+| `ALPHAFORGE_QUOTE_SYMBOLS` | `XAUUSD,EURUSD,GBPUSD,USDJPY,NAS100` | Symbols pushed every poll |
+| `ALPHAFORGE_CANDLE_JOBS` | `XAUUSD:H1:240` | `symbol:timeframe:count`, comma separated |
+| `ALPHAFORGE_POLL_SECONDS` | `0.75` | Command/quote loop interval |
+
+### Step C4 — Start it
+
+```powershell
+python bridge_agent.py
+```
+
+You should see:
+
+```
+[12:41:03] bridge id     : agent-9f3c1b2a4d55
+[12:41:03] bridge name   : TRADING-PC
+[12:41:03] quote symbols : XAUUSD, EURUSD, GBPUSD, USDJPY, NAS100
+[12:41:03] credentials found in the environment — connecting on startup
+[12:41:05] connected to the terminal
+```
+
+Leave the window open.
+
+### Step C5 — Connect from the dashboard
+
+1. Open the hosted dashboard, sign in, **Settings → MetaTrader 5 bridge**.
+2. Press **Save & connect**. The engine forwards the connect command to your
+   agent. (If you set the env vars above, the agent already connected at startup
+   and this just refreshes the status.)
+3. The panel flips to **connected** with a **via bridge · TRADING-PC** badge, and
+   account / server / balance / equity appear.
+
+You can leave `ENGINE_URL` blank for this path — the hosted engine does the
+relaying.
+
+### Checking on it
+
+- **Is the agent alive?** Supabase → Table Editor → `mt5_bridges`; `last_seen`
+  should be advancing every few seconds.
+- **Is a command stuck?** Table Editor → `mt5_commands`; any row lingering for
+  more than a few seconds means no agent is claiming it.
+
+### Security notes specific to Path C
+
+- `mt5_commands` carries order instructions and — **if you did not set the env
+  vars** — your terminal password. It is created with **no anon and no
+  authenticated RLS policy whatsoever**, so only the service-role key can read or
+  write it. Never add a permissive policy to that table.
+- The agent deletes each command row as soon as it is answered.
+- The service-role key lives in exactly two places you control: the Vercel
+  engine's env vars and this agent's environment. Treat both as production
+  secrets.
+- Nothing is exposed publicly — no inbound port, no public URL. This is strictly
+  safer than Path B.
+
+---
+
+## 6. Setting it up permanently (optional)
 
 ### Run the engine as a startup task
 
@@ -350,7 +481,7 @@ baked in at **build** time, so changing it requires a redeploy — which is why
 
 ---
 
-## 6. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -365,6 +496,11 @@ baked in at **build** time, so changing it requires a redeploy — which is why
 | **Connected, but the live price panel is blank for my symbol** | Symbol is not in Market Watch | Add it: right-click Market Watch → Symbols (§2.3). |
 | **Connected, but paper fills never execute / orders rejected** | Algo Trading is disabled | Green Algo Trading button in the MT5 toolbar + `Tools → Options → Expert Advisors`. |
 | **Green in Settings, red banner on the dashboard** | Stale status | Press **Refresh status** in the MT5 bridge panel. |
+| **Path C: "no bridge agent is online"** | Agent not running, or its heartbeat is older than 45s | Start `python bridge_agent.py`; confirm `mt5_bridges.last_seen` is advancing. |
+| **Path C: agent runs but status stays "online", not "connected"** | Terminal login failed | Read `mt5_bridges.error`; re-check `MT5_LOGIN` / `MT5_PASSWORD` / `MT5_SERVER`. |
+| **Path C: connected but no price** | Symbol missing from `ALPHAFORGE_QUOTE_SYMBOLS`, or not in Market Watch | Add it in both places (§2.3 and the table in step C3). |
+| **Path C: commands pile up in `mt5_commands`** | No agent polling for that `bridge_id` | The agent only claims rows matching its own `ALPHAFORGE_BRIDGE_ID`; check the id in its startup log. |
+| **Path C: orders shadow-fill instead of executing** | Algo Trading off, or the command timed out at 30s | Green Algo Trading button in MT5; watch the agent window for the error. |
 
 ### Manual endpoint checks
 
@@ -383,7 +519,7 @@ curl "http://localhost:8000/api/mt5/symbols"
 
 ---
 
-## 7. Quick reference
+## 8. Quick reference
 
 ```powershell
 # --- on the Windows PC, once -------------------------------------------
@@ -407,13 +543,25 @@ curl http://localhost:8000/api/mt5/status
 # 4. dashboard → Settings
 #      Python engine → ENGINE_URL = http://localhost:8000      (Path A)
 #                                or https://<tunnel-host>      (Path B)
+#                                or leave blank                (Path C)
 #      Execution · MetaTrader 5 → PATH / LOGIN / PASSWORD / SERVER
 #      Save & connect
+
+# --- Path C: bridge agent instead of a local engine -------------------------
+cd AlphaForge\backend
+.\.venv\Scripts\Activate.ps1
+pip install MetaTrader5==5.0.45 supabase
+$env:SUPABASE_URL              = "https://<project>.supabase.co"
+$env:SUPABASE_SERVICE_ROLE_KEY = "<service role key>"
+$env:MT5_LOGIN                 = "12345678"
+$env:MT5_PASSWORD              = "your-terminal-password"
+$env:MT5_SERVER                = "Broker-Demo"
+python bridge_agent.py
 ```
 
 ---
 
-## 8. Still stuck?
+## 9. Still stuck?
 
 Collect these four things and they will pinpoint the problem immediately:
 
