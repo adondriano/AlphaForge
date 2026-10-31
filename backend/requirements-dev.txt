@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# AlphaForge engine — full local development stack
+#   pip install -r requirements-dev.txt
+# Adds the ASGI server, the quant/ML stack (Optuna, pandas, numpy) and the
+# test runner on top of the runtime dependencies in requirements.txt.
+# ---------------------------------------------------------------------------
+-r requirements.txt
+
+# --- Local server / env ----------------------------------------------------
+uvicorn[standard]==0.30.6
+python-dotenv==1.0.1
+
+# --- Quantitative / ML stack (optional but recommended) --------------------
+optuna==3.6.1
+pandas>=2.2,<3
+numpy>=1.26,<3
+
+# --- Execution -------------------------------------------------------------
+# MetaTrader5 is a Windows-only C extension. Uncomment on Windows hosts only.
+# MetaTrader5==5.0.45
+
+# --- Tests ----------------------------------------------------------------
+pytest==8.3.2

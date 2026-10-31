@@ -1,0 +1,47 @@
+# --- dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# --- builds
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- env / secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+!.env.example
+
+# --- python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+backend/.local_state.json
+*.egg-info/
+
+# --- infra
+.vercel
+.vercel.json.bak
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+
+# --- editor
+.idea/
+.vscode/*
+!.vscode/extensions.json

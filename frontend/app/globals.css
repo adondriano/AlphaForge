@@ -1,0 +1,102 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: #06070c;
+  color: #e6e8ef;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  background-image:
+    radial-gradient(900px 500px at 12% -10%, rgba(240, 180, 41, 0.09), transparent 60%),
+    radial-gradient(800px 480px at 100% 0%, rgba(56, 189, 248, 0.08), transparent 55%),
+    radial-gradient(700px 500px at 50% 110%, rgba(167, 139, 250, 0.07), transparent 60%);
+  background-attachment: fixed;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-white/[0.06] bg-ink-900/70 shadow-panel backdrop-blur-sm;
+  }
+  .panel-hover {
+    @apply transition-colors hover:border-forge-amber/30 hover:bg-ink-850/80;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium;
+  }
+  .label {
+    @apply mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-white/45;
+  }
+  .input {
+    @apply w-full rounded-lg border border-white/10 bg-ink-950/70 px-3 py-2 text-sm text-white
+      placeholder:text-white/25 outline-none transition
+      focus:border-forge-amber/60 focus:ring-1 focus:ring-forge-amber/30;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-semibold
+      transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-forge-amber text-ink-950 hover:bg-amber-300;
+  }
+  .btn-ghost {
+    @apply btn border border-white/10 bg-white/[0.03] text-white/80 hover:border-white/25 hover:text-white;
+  }
+  .btn-danger {
+    @apply btn border border-forge-rose/30 bg-forge-rose/10 text-forge-rose hover:bg-forge-rose/20;
+  }
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.18);
+  background-clip: content-box;
+}
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  height: 16px;
+  width: 16px;
+  border-radius: 999px;
+  background: #f0b429;
+  cursor: pointer;
+  border: 2px solid #0a0c14;
+}
+input[type="range"]::-moz-range-thumb {
+  height: 16px;
+  width: 16px;
+  border: 2px solid #0a0c14;
+  border-radius: 999px;
+  background: #f0b429;
+  cursor: pointer;
+}

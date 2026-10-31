@@ -1,0 +1,9 @@
+# Minimal dependency set for the serverless deployment of the engine.
+# The heavy quant stack (optuna / pandas / numpy) is optional at runtime:
+# services.optuna_optimizer and services.backtester degrade gracefully.
+# Kept identical to ../requirements.txt so whichever file Vercel resolves,
+# the function bundle stays small.
+fastapi==0.115.0
+pydantic>=2.7,<3
+httpx==0.27.2
+supabase==2.7.4
