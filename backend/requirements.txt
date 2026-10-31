@@ -9,3 +9,5 @@ fastapi==0.115.0
 pydantic>=2.7,<3
 httpx==0.27.2
 supabase==2.7.4
+# Ed25519 request signing (Exness) + AES-GCM credential encryption
+cryptography>=43.0.0,<47.0.0

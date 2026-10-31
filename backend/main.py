@@ -35,16 +35,20 @@ import asyncio
 import os
 import time
 import uuid
+
+import httpx
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 try:  # `uvicorn main:app` from inside backend/
+    from services import brokers
     from services import llm as llm_service
-    from services import mt5_executor
+    from services.broker_service import brokers_service
+    from services.broker_vault import vault
     from services.backtester import generate_bars, run_backtest
     from services.optuna_optimizer import optimize as run_optimizer
     from services.python_analyzer import analyze_strategy
@@ -58,8 +62,10 @@ try:  # `uvicorn main:app` from inside backend/
         parse_manual_json,
     )
 except ImportError:  # pragma: no cover - imported as part of a package
+    from .services import brokers
     from .services import llm as llm_service
-    from .services import mt5_executor
+    from .services.broker_service import brokers_service
+    from .services.broker_vault import vault
     from .services.backtester import generate_bars, run_backtest
     from .services.optuna_optimizer import optimize as run_optimizer
     from .services.python_analyzer import analyze_strategy
@@ -110,9 +116,20 @@ def _configure_store(settings: Settings) -> None:
     store.configure(settings.NEXT_PUBLIC_SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
     # The MT5 relay talks to the same project, but with the service-role key so
     # it can reach the (deliberately anon-denied) bridge tables.
-    mt5_executor.relay.configure(
-        settings.NEXT_PUBLIC_SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY
-    )
+    # Broker credentials live encrypted in the same project, reachable only
+    # with the service-role key.
+    if settings.has_supabase:
+        try:
+            from supabase import create_client
+
+            vault.configure(
+                create_client(
+                    settings.NEXT_PUBLIC_SUPABASE_URL,
+                    settings.SUPABASE_SERVICE_ROLE_KEY,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - client unavailable
+            print(f"[broker_vault] unavailable: {exc}", flush=True)
 
 
 def _roll_day() -> None:
@@ -354,6 +371,10 @@ class OrderRequest(BaseModel):
     take_profit: float = 0.0
     mode: str = "paper"
     risk_pct: Optional[float] = None
+    # Which saved broker connection should take this order. Both blank means
+    # "no broker configured", which routes to a paper fill.
+    user_id: Optional[str] = None
+    connection_id: Optional[str] = None
 
 
 class PaperRunRequest(BaseModel):
@@ -458,19 +479,10 @@ def health() -> Dict[str, Any]:
                 "model": settings.OPENAI_MODEL if settings.OPENAI_API_KEY else
                          (settings.OLLAMA_MODEL if settings.ollama_reachable_url else None),
             },
-            "mt5": mt5_executor.bridge.status(settings),
-            "mt5_relay": {
-                "enabled": mt5_executor.relay.enabled,
-                "error": mt5_executor.relay.last_error,
-                "bridges": [
-                    {
-                        "id": b.get("id"),
-                        "name": b.get("name"),
-                        "status": b.get("status"),
-                        "age_seconds": b.get("_age_seconds"),
-                    }
-                    for b in mt5_executor.relay.active_bridges()
-                ],
+            "brokers": {
+                "providers": brokers.ids(),
+                "vault_enabled": vault.enabled,
+                "vault_error": vault.last_error,
             },
         },
         "risk": {
@@ -1076,14 +1088,18 @@ def submit_order(payload: OrderRequest) -> Dict[str, Any]:
     volume = decision.adjusted_volume if decision.allowed else 0.0
     execution = None
     if decision.allowed:
-        execution = mt5_executor.bridge.place_order({
-            "symbol": payload.symbol,
-            "side": payload.side,
-            "volume": volume,
-            "price": payload.price,
-            "stop_loss": payload.stop_loss,
-            "take_profit": payload.take_profit,
-        })
+        execution = brokers_service.place_order(
+            {
+                "symbol": payload.symbol,
+                "side": payload.side,
+                "volume": volume,
+                "price": payload.price,
+                "stop_loss": payload.stop_loss,
+                "take_profit": payload.take_profit,
+            },
+            connection_id=payload.connection_id,
+            user_id=payload.user_id,
+        )
 
     log = store.insert_trade_log({
         "strategy_id": payload.strategy_id,
@@ -1104,7 +1120,7 @@ def submit_order(payload: OrderRequest) -> Dict[str, Any]:
             "decision": decision.to_dict(),
             "execution": execution,
             "shield": shield.to_dict(),
-            "settings_mode": settings.MT5_PATH and "mt5" or "shadow",
+            "settings_mode": (execution or {}).get("mode", "shadow"),
         },
     })
 
@@ -1231,7 +1247,8 @@ def read_settings() -> Dict[str, Any]:
             "supabase": store.mode,
             "llm_provider": settings.llm_provider,
             "optimizer": "optuna-tpe" if _has_optuna() else "random-search",
-            "mt5": mt5_executor.bridge.status(settings),
+            "brokers": [p["id"] for p in brokers.describe_all()],
+            "broker_vault": vault.enabled,
         },
     }
 
@@ -1267,16 +1284,15 @@ def write_settings(payload: SettingsUpdate) -> Dict[str, Any]:
 # Realtime websocket (companion to the Supabase Realtime channel)
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
-# MetaTrader 5 bridge
+# Broker connections
 # ---------------------------------------------------------------------------
-class MT5ConnectRequest(BaseModel):
-    """Blank fields fall back to the values saved in the Settings tab."""
+class BrokerConnectionRequest(BaseModel):
+    """Credentials for one broker, keyed by the provider's field descriptors."""
 
-    path: Optional[str] = None
-    login: Optional[str] = None
-    password: Optional[str] = None
-    server: Optional[str] = None
-    timeout: int = 60000
+    provider: str
+    credentials: Dict[str, Any] = Field(default_factory=dict)
+    label: str = ""
+    connection_id: Optional[str] = None
 
 
 class ResetRequest(BaseModel):
@@ -1287,58 +1303,136 @@ class ResetRequest(BaseModel):
     reseed: bool = False
 
 
-@app.get("/api/mt5/status")
-def mt5_status() -> Dict[str, Any]:
+def _user_id_from_request(request: Request) -> Optional[str]:
+    """Verify the caller's Supabase JWT and return their user id.
+
+    Broker credentials move real money, so these endpoints do **not** trust a
+    ``user_id`` in the request body the way the strategy endpoints do. The
+    token is checked against Supabase's own ``/auth/v1/user``, and a failure to
+    verify means "no user", which resolves to no connection.
+    """
+    header = request.headers.get("authorization") or ""
+    if not header.lower().startswith("bearer "):
+        return None
+    token = header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+
     settings = get_settings()
-    status = mt5_executor.bridge.status(settings)
-    status["credentials"] = {
-        "login": bool(settings.MT5_LOGIN),
-        "password": bool(settings.MT5_PASSWORD),
-        "server": bool(settings.MT5_SERVER),
-        "path": bool(settings.MT5_PATH),
-    }
-    return status
+    base = (settings.NEXT_PUBLIC_SUPABASE_URL or "").rstrip("/")
+    if not base:
+        return None
+    try:
+        response = httpx.get(
+            f"{base}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": settings.NEXT_PUBLIC_SUPABASE_ANON_KEY or "",
+            },
+            timeout=8.0,
+        )
+    except Exception:
+        return None
+    if response.status_code != 200:
+        return None
+    try:
+        value = (response.json() or {}).get("id")
+    except ValueError:
+        return None
+    return str(value) if value else None
 
 
-@app.post("/api/mt5/connect")
-def mt5_connect(payload: MT5ConnectRequest | None = None) -> Dict[str, Any]:
-    """Launch the terminal (if needed) and log in."""
-    settings = get_settings()
-    body = payload or MT5ConnectRequest()
-    outcome = mt5_executor.bridge.connect(
-        path=body.path if body.path is not None else (settings.MT5_PATH or ""),
-        login=body.login if body.login is not None else (settings.MT5_LOGIN or ""),
-        password=body.password if body.password is not None else (settings.MT5_PASSWORD or ""),
-        server=body.server if body.server is not None else (settings.MT5_SERVER or ""),
-        timeout=body.timeout or 60000,
-    )
-    if outcome.get("connected"):
-        outcome["status"] = mt5_executor.bridge.status(settings)
-    return outcome
+@app.get("/api/brokers")
+def list_brokers() -> Dict[str, Any]:
+    """Every provider the engine can talk to, with the fields each one needs."""
+    return brokers_service.describe()
 
 
-@app.post("/api/mt5/disconnect")
-def mt5_disconnect() -> Dict[str, Any]:
-    return {**mt5_executor.bridge.disconnect(), "status": mt5_executor.bridge.status(get_settings())}
+@app.get("/api/broker/connections")
+def list_connections(request: Request) -> Dict[str, Any]:
+    user_id = _user_id_from_request(request)
+    if not user_id:
+        return {"connections": [], "reason": "Sign in to manage broker connections."}
+    return {"connections": vault.list_for(user_id)}
 
 
-@app.get("/api/mt5/price")
-def mt5_price(symbol: str = Query("XAUUSD")) -> Dict[str, Any]:
-    return mt5_executor.bridge.price(symbol)
+@app.post("/api/broker/connections")
+def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[str, Any]:
+    """Validate, store encrypted, then report whether it actually works."""
+    user_id = _user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Sign in to connect a broker.")
+
+    provider = brokers.get(payload.provider)
+    if provider is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown broker '{payload.provider}'. Known: {', '.join(brokers.ids())}.",
+        )
+
+    creds = {k: str(v) for k, v in (payload.credentials or {}).items()}
+    problem = provider.validate(creds)
+    if problem:
+        # Refuse to store credentials we already know are unusable.
+        raise HTTPException(status_code=400, detail=problem)
+
+    try:
+        connection = vault.save(
+            user_id,
+            provider.id,
+            creds,
+            label=payload.label or provider.label,
+            connection_id=payload.connection_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    status = brokers_service.status(connection.get("id"), user_id)
+    return {"connection": connection, "status": status}
 
 
-@app.get("/api/mt5/candles")
-def mt5_candles(
+@app.delete("/api/broker/connections/{connection_id}")
+def delete_connection(connection_id: str, request: Request) -> Dict[str, Any]:
+    user_id = _user_id_from_request(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Sign in to manage broker connections.")
+    return {"deleted": vault.delete(connection_id, user_id)}
+
+
+@app.get("/api/broker/status")
+def broker_status(request: Request, connection_id: Optional[str] = None) -> Dict[str, Any]:
+    return brokers_service.status(connection_id, _user_id_from_request(request))
+
+
+@app.get("/api/broker/price")
+def broker_price(
+    request: Request,
+    symbol: str = Query("XAUUSD"),
+    connection_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return brokers_service.price(symbol, connection_id, _user_id_from_request(request))
+
+
+@app.get("/api/broker/candles")
+def broker_candles(
+    request: Request,
     symbol: str = Query("XAUUSD"),
     timeframe: str = Query("H1"),
     count: int = Query(120),
+    connection_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return mt5_executor.bridge.candles(symbol, timeframe.upper(), count)
+    return brokers_service.candles(
+        symbol, timeframe.upper(), count, connection_id, _user_id_from_request(request)
+    )
 
 
-@app.get("/api/mt5/symbols")
-def mt5_symbols(needle: str = Query("")) -> Dict[str, Any]:
-    return mt5_executor.bridge.symbols(needle)
+@app.get("/api/broker/symbols")
+def broker_symbols(
+    request: Request,
+    needle: str = Query(""),
+    connection_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    return brokers_service.symbols(needle, connection_id, _user_id_from_request(request))
 
 
 @app.post("/api/reset")

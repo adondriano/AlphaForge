@@ -3,10 +3,9 @@
 /**
  * Live market panel.
  *
- * MetaTrader 5 is a Windows-only terminal bridge, so this panel is only ever
- * populated when the Python engine is running on the machine that has MT5
- * installed and logged in. Otherwise it renders an explicit "connect MT5"
- * state — it never shows a simulated price.
+ * Prices come from whichever broker the user has connected in Settings. With
+ * no broker it renders an explicit disconnected state — it never shows a
+ * simulated price.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -14,7 +13,7 @@ import { Activity, AlertTriangle, ArrowDown, ArrowUp, Radio, RefreshCw } from "l
 
 import * as api from "@/lib/api";
 import { fmt } from "@/lib/format";
-import type { Mt5Candle, Mt5Quote, Mt5Status } from "@/lib/types";
+import type { BrokerCandle, BrokerQuote, BrokerStatus } from "@/lib/types";
 import { Spinner } from "./ui";
 
 const POLL_MS = 2000;
@@ -22,12 +21,12 @@ const POLL_MS = 2000;
 interface Props {
   symbol: string;
   timeframe: string;
-  status: Mt5Status | null;
+  status: BrokerStatus | null;
   onConnect?: () => void;
   compact?: boolean;
 }
 
-function CandleChart({ candles }: { candles: Mt5Candle[] }) {
+function CandleChart({ candles }: { candles: BrokerCandle[] }) {
   if (candles.length < 2) return null;
   const W = 320;
   const H = 88;
@@ -73,8 +72,8 @@ function CandleChart({ candles }: { candles: Mt5Candle[] }) {
 }
 
 export default function LivePricePanel({ symbol, timeframe, status, onConnect, compact }: Props) {
-  const [quote, setQuote] = useState<Mt5Quote | null>(null);
-  const [candles, setCandles] = useState<Mt5Candle[]>([]);
+  const [quote, setQuote] = useState<BrokerQuote | null>(null);
+  const [candles, setCandles] = useState<BrokerCandle[]>([]);
   const [changePct, setChangePct] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -89,8 +88,8 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
       if (initial) setLoading(true);
       try {
         const [nextQuote, nextCandles] = await Promise.all([
-          api.mt5Price(symbol),
-          api.mt5Candles(symbol, timeframe, 60),
+          api.brokerPrice(symbol),
+          api.brokerCandles(symbol, timeframe, 60),
         ]);
         if (nextQuote.available) {
           setQuote(nextQuote);
@@ -131,13 +130,13 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
   if (!connected) {
     const reason =
       status?.reason ??
-      "Live quotes need the Python engine running locally on the machine that has MetaTrader 5 installed. A hosted deployment cannot reach your terminal.";
+      "Connect a broker in Settings to stream real prices. No broker is connected, so no price is shown — AlphaForge never invents one.";
 
     if (compact) {
       return (
         <div className="flex items-center gap-2 rounded-lg border border-dashed border-white/10 px-3 py-2 text-[11px] text-white/40">
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-400/70" />
-          <span>MT5 not connected — no live price</span>
+          <span>No broker connected — no live price</span>
         </div>
       );
     }

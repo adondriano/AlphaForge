@@ -23,7 +23,9 @@ import type {
   BacktestCurve,
   BacktestResult,
   Metrics,
-  Mt5Status,
+  BrokerConnection,
+  BrokerDescriptor,
+  BrokerStatus,
   Optimization,
   OptimizeResult,
   PaperStats,
@@ -67,8 +69,11 @@ interface AlphaForgeContextValue {
   storeMode: "supabase" | "local";
   toasts: Toast[];
 
-  mt5Status: Mt5Status | null;
-  mt5Busy: boolean;
+  brokerStatus: BrokerStatus | null;
+  brokerBusy: boolean;
+  brokerCatalogue: BrokerDescriptor[];
+  brokerVaultReady: boolean;
+  brokerConnections: BrokerConnection[];
   paperStats: Record<string, PaperStats>;
   paperBusy: Record<string, boolean>;
   /** Equity series from the most recent backtest of each strategy. */
@@ -104,9 +109,14 @@ interface AlphaForgeContextValue {
   resetAccount: (equity?: number) => void;
   clearTrades: () => Promise<void>;
 
-  refreshMt5: () => Promise<Mt5Status>;
-  connectMt5: (credentials?: api.Mt5Credentials) => Promise<boolean>;
-  disconnectMt5: () => Promise<void>;
+  refreshBroker: () => Promise<BrokerStatus>;
+  refreshBrokerConnections: () => Promise<void>;
+  connectBroker: (
+    provider: string,
+    credentials: Record<string, string>,
+    label?: string,
+  ) => Promise<boolean>;
+  deleteBrokerConnection: (connectionId: string) => Promise<void>;
 
   resetEverything: (options?: { reseed?: boolean }) => Promise<void>;
 }
@@ -164,7 +174,7 @@ const emptyPaperStats = (strategy: Strategy, running = false): PaperStats => ({
 });
 
 export function AlphaForgeProvider({ children }: { children: ReactNode }) {
-  const { user, isGuest, ready: authReady } = useAuth();
+  const { user, session, isGuest, ready: authReady } = useAuth();
 
   const [ready, setReady] = useState(false);
   const [strategies, setStrategies] = useState<Strategy[]>([]);
@@ -182,8 +192,11 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   const [storeMode, setStoreMode] = useState<"supabase" | "local">("local");
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const [mt5Status, setMt5Status] = useState<Mt5Status | null>(null);
-  const [mt5Busy, setMt5Busy] = useState(false);
+  const [brokerState, setBrokerState] = useState<BrokerStatus | null>(null);
+  const [brokerBusy, setBrokerBusy] = useState(false);
+  const [brokerCatalogue, setBrokerCatalogue] = useState<BrokerDescriptor[]>([]);
+  const [brokerVaultReady, setBrokerVaultReady] = useState(false);
+  const [brokerConnections, setBrokerConnections] = useState<BrokerConnection[]>([]);
   const [paperBusy, setPaperBusy] = useState<Record<string, boolean>>({});
   const [paperStats, setPaperStats] = useState<Record<string, PaperStats>>({});
   const [lastCurves, setLastCurves] = useState<Record<string, BacktestCurve>>({});
@@ -278,8 +291,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       await refresh();
       const status = await api.refreshEngineStatus();
       if (!cancelled) setEngineStatus(status);
-      const mt5 = await api.mt5Status();
-      if (!cancelled) setMt5Status(mt5);
+      const catalogue = await api.brokerCatalogue();
+      if (!cancelled) {
+        setBrokerCatalogue(catalogue.providers);
+        setBrokerVaultReady(Boolean(catalogue.vault_enabled));
+      }
+      if (!cancelled) setBrokerState(await api.brokerStatus(sessionToken));
       if (!cancelled) setReady(true);
     })();
     return () => {
@@ -339,59 +356,101 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /* ------------------------------------------------------------------ */
-  /* MetaTrader 5                                                        */
+  /* Broker connections                                                  */
   /* ------------------------------------------------------------------ */
-  const refreshMt5 = useCallback(async () => {
-    const status = await api.mt5Status();
-    setMt5Status(status);
-    return status;
-  }, []);
+  /** The Supabase JWT. Broker endpoints are authenticated — these keys move
+   *  real money, so nothing about them trusts a body parameter. */
+  const sessionToken = session?.access_token;
 
-  const connectMt5 = useCallback(
-    async (credentials?: api.Mt5Credentials) => {
-      setMt5Busy(true);
+  const refreshBroker = useCallback(async () => {
+    const status = await api.brokerStatus(sessionToken);
+    setBrokerState(status);
+    return status;
+  }, [sessionToken]);
+
+  const refreshBrokerConnections = useCallback(async () => {
+    if (!sessionToken) {
+      setBrokerConnections([]);
+      return;
+    }
+    const outcome = await api.listBrokerConnections(sessionToken);
+    setBrokerConnections(outcome.connections ?? []);
+  }, [sessionToken]);
+
+  const connectBroker = useCallback(
+    async (provider: string, credentials: Record<string, string>, label?: string) => {
+      if (!sessionToken) {
+        notify({
+          kind: "error",
+          title: "Sign in to connect a broker",
+          detail: "Broker credentials are stored against your account.",
+        });
+        return false;
+      }
+      setBrokerBusy(true);
       try {
-        const status = await api.mt5Connect(credentials ?? {});
-        setMt5Status(status);
-        if (status.connected) {
+        const outcome = await api.saveBrokerConnection(sessionToken, {
+          provider,
+          credentials,
+          label,
+        });
+        setBrokerState(outcome.status);
+        await refreshBrokerConnections();
+        const name = brokerCatalogue.find((entry) => entry.id === provider)?.label ?? provider;
+        if (outcome.status.connected) {
           notify({
             kind: "success",
-            title: "MetaTrader 5 connected",
-            detail: status.account?.server
-              ? `Account ${status.account.login ?? "—"} on ${status.account.server}`
+            title: `${name} connected`,
+            detail: outcome.status.account?.login
+              ? `Account ${outcome.status.account.login}`
               : "Live quotes and execution are now available.",
           });
         } else {
           notify({
             kind: "error",
-            title: "Could not connect to MetaTrader 5",
-            detail: status.reason ?? "Unknown error from the terminal bridge.",
+            title: `Could not reach ${name}`,
+            detail:
+              outcome.error ??
+              outcome.status.reason ??
+              "The credentials were saved but the broker did not accept them.",
           });
         }
-        return Boolean(status.connected);
+        return Boolean(outcome.status.connected);
       } catch (error) {
         notify({
           kind: "error",
-          title: "Could not reach the engine",
+          title: "Could not save the connection",
           detail: error instanceof Error ? error.message : String(error),
         });
         return false;
       } finally {
-        setMt5Busy(false);
+        setBrokerBusy(false);
       }
     },
-    [notify],
+    [notify, refreshBrokerConnections, sessionToken, brokerCatalogue],
   );
 
-  const disconnectMt5 = useCallback(async () => {
-    setMt5Busy(true);
-    try {
-      setMt5Status(await api.mt5Disconnect());
-      notify({ kind: "info", title: "MetaTrader 5 disconnected" });
-    } finally {
-      setMt5Busy(false);
-    }
-  }, [notify]);
+  const removeBrokerConnection = useCallback(
+    async (connectionId: string) => {
+      if (!sessionToken) return;
+      setBrokerBusy(true);
+      try {
+        await api.deleteBrokerConnection(sessionToken, connectionId);
+        await refreshBrokerConnections();
+        setBrokerState(await api.brokerStatus(sessionToken));
+        notify({ kind: "info", title: "Broker connection removed" });
+      } finally {
+        setBrokerBusy(false);
+      }
+    },
+    [notify, refreshBrokerConnections, sessionToken],
+  );
+
+  // Connections are per account, so reload them whenever the user changes.
+  useEffect(() => {
+    void refreshBrokerConnections();
+    void refreshBroker();
+  }, [refreshBrokerConnections, refreshBroker]);
 
   /* ------------------------------------------------------------------ */
   /* settings                                                            */
@@ -414,10 +473,9 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       }
       await api.pushSettings(next);
       setEngineStatus(await api.refreshEngineStatus());
-      // Credentials may have changed — the bridge status depends on them.
-      setMt5Status(await api.mt5Status());
+      setBrokerState(await api.brokerStatus(sessionToken));
     },
-    [refresh, requireAccount],
+    [refresh, requireAccount, sessionToken],
   );
 
   /* ------------------------------------------------------------------ */
@@ -1094,8 +1152,11 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       engineStatus,
       storeMode: getSupabaseClient() ? "supabase" : storeMode,
       toasts,
-      mt5Status,
-      mt5Busy,
+      brokerStatus: brokerState,
+      brokerBusy,
+      brokerCatalogue,
+      brokerVaultReady,
+      brokerConnections,
       paperStats,
       paperBusy,
       lastCurves,
@@ -1118,9 +1179,10 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       runPaperSession,
       resetAccount,
       clearTrades,
-      refreshMt5,
-      connectMt5,
-      disconnectMt5,
+      refreshBroker,
+      refreshBrokerConnections,
+      connectBroker,
+      deleteBrokerConnection: removeBrokerConnection,
       resetEverything,
     }),
     [
@@ -1133,8 +1195,11 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       engineStatus,
       storeMode,
       toasts,
-      mt5Status,
-      mt5Busy,
+      brokerState,
+      brokerBusy,
+      brokerCatalogue,
+      brokerVaultReady,
+      brokerConnections,
       paperStats,
       paperBusy,
       lastCurves,
@@ -1157,9 +1222,10 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       runPaperSession,
       resetAccount,
       clearTrades,
-      refreshMt5,
-      connectMt5,
-      disconnectMt5,
+      refreshBroker,
+      refreshBrokerConnections,
+      connectBroker,
+      removeBrokerConnection,
       resetEverything,
     ],
   );

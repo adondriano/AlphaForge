@@ -14,9 +14,12 @@ import type {
   AnalysisReport,
   AppSettings,
   BacktestResult,
-  Mt5CandleSeries,
-  Mt5Quote,
-  Mt5Status,
+  BrokerCandle,
+  BrokerCandleSeries,
+  BrokerConnection,
+  BrokerDescriptor,
+  BrokerQuote,
+  BrokerStatus,
   Metrics,
   OptimizeResult,
   Strategy,
@@ -68,7 +71,7 @@ export type EngineStatus = {
     supabase?: { mode?: string; reachable?: boolean };
     llm?: { provider?: string };
     optimizer?: string;
-    mt5?: { mode?: string; connected?: boolean };
+    brokers?: { providers?: string[]; vault_enabled?: boolean };
   };
 };
 
@@ -120,6 +123,67 @@ async function get<T>(path: string, timeoutMs = 8000): Promise<T> {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`${apiUrl()}${path}`, { signal: controller.signal });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Broker credential endpoints are authenticated: they refuse to trust a
+ * user id from the body because these keys move real money. The caller's
+ * Supabase JWT rides along in the Authorization header instead.
+ */
+async function getAuth<T>(path: string, token: string, timeoutMs = 8000): Promise<T> {
+  if (!apiUrl()) throw new Error("no api url");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiUrl()}${path}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function requestAuth<T>(
+  path: string,
+  body: unknown,
+  token: string,
+  timeoutMs = 20000,
+): Promise<T> {
+  if (!apiUrl()) throw new Error("no api url");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiUrl()}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body ?? {}),
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function deleteAuth<T>(path: string, token: string, timeoutMs = 15000): Promise<T> {
+  if (!apiUrl()) throw new Error("no api url");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${apiUrl()}${path}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
     if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
     return (await response.json()) as T;
   } finally {
@@ -441,111 +505,158 @@ export async function fetchSettings(): Promise<Partial<AppSettings> | null> {
 }
 
 /* -------------------------------------------------------------------------- */
-/* MetaTrader 5 bridge                                                         */
+/* Broker connections                                                          */
 /* -------------------------------------------------------------------------- */
 
 /**
  * Returned whenever the engine cannot be reached. The UI renders an explicit
- * "connect MT5" state from this — it must never invent a price.
+ * disconnected state from this — it must never invent a price.
  */
-export const MT5_UNAVAILABLE: Mt5Status = {
+export const BROKER_UNAVAILABLE: BrokerStatus = {
   available: false,
   connected: false,
   mode: "unavailable",
   configured: false,
-  reason:
-    apiUrl()
-      ? "The Python engine is unreachable. Start it locally (`uvicorn main:app --port 8000`) on the machine that has MetaTrader 5 installed."
-      : "No Python engine configured. Live quotes need the local Python engine running on the machine that has MetaTrader 5 — set Engine URL in Settings and connect it.",
+  reason: apiUrl()
+    ? "The Python engine is unreachable, so no broker connection can be checked."
+    : "No Python engine configured. Set Engine URL in Settings to connect a broker.",
 };
 
-export interface Mt5Credentials {
-  path?: string;
-  login?: string;
-  password?: string;
-  server?: string;
-  timeout?: number;
-}
-
-export async function mt5Status(): Promise<Mt5Status> {
-  if (!apiUrl()) return MT5_UNAVAILABLE;
+/** The catalogue of providers and the credential fields each one needs. */
+export async function brokerCatalogue(): Promise<{
+  providers: BrokerDescriptor[];
+  vault_enabled: boolean;
+  vault_error?: string | null;
+}> {
+  if (!apiUrl()) return { providers: [], vault_enabled: false };
   try {
-    return await get<Mt5Status>("/api/mt5/status", 8000);
+    return await get<{
+      providers: BrokerDescriptor[];
+      vault_enabled: boolean;
+      vault_error?: string | null;
+    }>("/api/brokers", 8000);
   } catch {
-    return MT5_UNAVAILABLE;
+    return { providers: [], vault_enabled: false };
   }
 }
 
-/** Launch the terminal (if needed) and log in. Blank fields use saved settings. */
-export async function mt5Connect(
-  credentials: Mt5Credentials = {},
-): Promise<Mt5Status & { reason?: string }> {
-  if (!apiUrl()) return MT5_UNAVAILABLE;
-  const outcome = await request<{ connected: boolean; reason?: string; status?: Mt5Status }>(
-    "/api/mt5/connect",
-    credentials,
-    90000,
-  );
-  return outcome.status ?? { ...(outcome as Mt5Status) };
-}
-
-export async function mt5Disconnect(): Promise<Mt5Status> {
-  if (!apiUrl()) return MT5_UNAVAILABLE;
+export async function brokerStatus(
+  token?: string,
+  connectionId?: string,
+): Promise<BrokerStatus> {
+  if (!apiUrl()) return BROKER_UNAVAILABLE;
+  const query = connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "";
   try {
-    const outcome = await request<{ status?: Mt5Status }>("/api/mt5/disconnect", {}, 15000);
-    return outcome.status ?? MT5_UNAVAILABLE;
+    if (token) return await getAuth<BrokerStatus>(`/api/broker/status${query}`, token, 10000);
+    return await get<BrokerStatus>(`/api/broker/status${query}`, 8000);
   } catch {
-    return MT5_UNAVAILABLE;
+    return BROKER_UNAVAILABLE;
   }
 }
 
-export async function mt5Price(symbol: string): Promise<Mt5Quote> {
+export async function listBrokerConnections(
+  token: string,
+): Promise<{ connections: BrokerConnection[]; reason?: string }> {
+  if (!apiUrl()) return { connections: [], reason: BROKER_UNAVAILABLE.reason };
+  try {
+    return await getAuth<{ connections: BrokerConnection[]; reason?: string }>(
+      "/api/broker/connections",
+      token,
+    );
+  } catch {
+    return { connections: [], reason: BROKER_UNAVAILABLE.reason };
+  }
+}
+
+export async function saveBrokerConnection(
+  token: string,
+  payload: {
+    provider: string;
+    credentials: Record<string, string>;
+    label?: string;
+    connection_id?: string;
+  },
+): Promise<{ connection: BrokerConnection; status: BrokerStatus; error?: string }> {
   if (!apiUrl()) {
-    return { available: false, symbol, reason: MT5_UNAVAILABLE.reason };
+    return { connection: {} as BrokerConnection, status: BROKER_UNAVAILABLE };
   }
   try {
-    return await get<Mt5Quote>(`/api/mt5/price?symbol=${encodeURIComponent(symbol)}`, 8000);
-  } catch {
-    return { available: false, symbol, reason: MT5_UNAVAILABLE.reason };
+    return await requestAuth<{ connection: BrokerConnection; status: BrokerStatus }>(
+      "/api/broker/connections",
+      payload,
+      token,
+      20000,
+    );
+  } catch (err) {
+    return {
+      connection: {} as BrokerConnection,
+      status: { ...BROKER_UNAVAILABLE, reason: String((err as Error)?.message ?? err) },
+      error: String((err as Error)?.message ?? err),
+    };
   }
 }
 
-export async function mt5Candles(
+export async function deleteBrokerConnection(
+  token: string,
+  connectionId: string,
+): Promise<boolean> {
+  if (!apiUrl()) return false;
+  try {
+    const outcome = await deleteAuth<{ deleted: boolean }>(
+      `/api/broker/connections/${encodeURIComponent(connectionId)}`,
+      token,
+    );
+    return outcome.deleted ?? false;
+  } catch {
+    return false;
+  }
+}
+
+export async function brokerPrice(symbol: string, connectionId?: string): Promise<BrokerQuote> {
+  if (!apiUrl()) return { available: false, symbol, reason: BROKER_UNAVAILABLE.reason };
+  const query = `?symbol=${encodeURIComponent(symbol)}${
+    connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""
+  }`;
+  try {
+    return await get<BrokerQuote>(`/api/broker/price${query}`, 8000);
+  } catch {
+    return { available: false, symbol, reason: BROKER_UNAVAILABLE.reason };
+  }
+}
+
+export async function brokerCandles(
   symbol: string,
   timeframe = "H1",
   count = 120,
-): Promise<Mt5CandleSeries> {
-  if (!apiUrl()) {
-    return {
-      available: false,
-      symbol,
-      timeframe,
-      candles: [],
-      reason: MT5_UNAVAILABLE.reason,
-    };
-  }
+  connectionId?: string,
+): Promise<BrokerCandleSeries> {
+  const empty = {
+    available: false,
+    symbol,
+    timeframe,
+    candles: [] as BrokerCandle[],
+    reason: BROKER_UNAVAILABLE.reason,
+  };
+  if (!apiUrl()) return empty;
+  const query =
+    `?symbol=${encodeURIComponent(symbol)}` +
+    `&timeframe=${encodeURIComponent(timeframe)}&count=${count}` +
+    (connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : "");
   try {
-    return await get<Mt5CandleSeries>(
-      `/api/mt5/candles?symbol=${encodeURIComponent(symbol)}` +
-        `&timeframe=${encodeURIComponent(timeframe)}&count=${count}`,
-      10000,
-    );
+    return await get<BrokerCandleSeries>(`/api/broker/candles${query}`, 10000);
   } catch {
-    return {
-      available: false,
-      symbol,
-      timeframe,
-      candles: [],
-      reason: MT5_UNAVAILABLE.reason,
-    };
+    return empty;
   }
 }
 
-export async function mt5Symbols(needle = ""): Promise<string[]> {
+export async function brokerSymbols(needle = "", connectionId?: string): Promise<string[]> {
   if (!apiUrl()) return [];
+  const query = `?needle=${encodeURIComponent(needle)}${
+    connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""
+  }`;
   try {
     const outcome = await get<{ available: boolean; symbols: string[] }>(
-      `/api/mt5/symbols?needle=${encodeURIComponent(needle)}`,
+      `/api/broker/symbols${query}`,
       8000,
     );
     return outcome.symbols ?? [];

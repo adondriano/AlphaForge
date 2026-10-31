@@ -63,9 +63,7 @@ export default function StrategyDetailModal({
     settings,
     engineStatus,
     lastCurves,
-    mt5Status,
-    connectMt5,
-    mt5Busy,
+    brokerStatus,
   } = useAlphaForge();
 
   const strategy = strategies.find((item) => item.id === strategyId) ?? null;
@@ -221,8 +219,7 @@ export default function StrategyDetailModal({
           <LivePricePanel
             symbol={strategy.symbol}
             timeframe={strategy.timeframe}
-            status={mt5Status}
-            onConnect={mt5Busy ? undefined : () => void connectMt5()}
+            status={brokerStatus}
           />
 
           {/* ------------------------------------------------ analyzer */}

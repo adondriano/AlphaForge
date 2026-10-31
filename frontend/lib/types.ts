@@ -280,16 +280,53 @@ export interface RiskDecision {
   breach?: string | null;
 }
 
-export type Mt5Mode = "live" | "shadow" | "unavailable" | "relay";
+export type BrokerMode = "live" | "shadow" | "unavailable" | "halted";
 
-export interface Mt5Status {
+/** One credential input declared by a provider. The Settings form is generated
+ *  from these, so adding a broker never means writing new React. */
+export interface BrokerCredentialField {
+  key: string;
+  label: string;
+  secret: boolean;
+  placeholder: string;
+  help: string;
+  required: boolean;
+}
+
+export interface BrokerDescriptor {
+  id: string;
+  label: string;
+  docs_url: string;
+  fields: BrokerCredentialField[];
+  /** Asset classes this broker cannot serve, e.g. ["index", "stock"]. */
+  unsupported: string[];
+  supports_streaming: boolean;
+}
+
+/** A saved connection. Never carries the credentials themselves. */
+export interface BrokerConnection {
+  id: string;
+  user_id: string;
+  provider: string;
+  label: string;
+  last_status: string | null;
+  last_checked_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BrokerStatus {
   available: boolean;
   connected: boolean;
-  mode: Mt5Mode;
+  mode: BrokerMode;
   configured: boolean;
   reason?: string;
+  provider?: string;
+  connection_id?: string;
+  /** Capability warnings, e.g. "Exness does not offer indices". */
+  warnings?: string[];
   account?: {
-    login?: number | null;
+    login?: number | string | null;
     server?: string | null;
     balance?: number | null;
     equity?: number | null;
@@ -300,36 +337,13 @@ export interface Mt5Status {
     name?: string | null;
     broker?: string | null;
   } | null;
-  terminal?: {
-    name?: string | null;
-    company?: string | null;
-    path?: string | null;
-    build?: number | null;
-    trade_allowed?: boolean | null;
-    connected?: boolean | null;
-  } | null;
-  credentials?: {
-    login: boolean;
-    password: boolean;
-    server: boolean;
-    path: boolean;
-  } | null;
-  /**
-   * Present when the answer came from `bridge_agent.py` on the user's Windows
-   * machine rather than from a terminal attached to this process. The hosted
-   * engine can never import MetaTrader5, so this is the normal live path there.
-   */
-  relay?: {
-    id: string;
-    name: string;
-    last_seen: string | null;
-    age_seconds: number | null;
-  } | null;
+  environment?: string;
 }
 
-export interface Mt5Quote {
+export interface BrokerQuote {
   available: boolean;
   symbol: string;
+  mode?: string;
   bid?: number;
   ask?: number;
   last?: number;
@@ -339,13 +353,11 @@ export interface Mt5Quote {
   time?: number;
   server_time?: string;
   reason?: string;
-  /** Seconds since the bridge agent pushed this tick. */
-  quote_age_seconds?: number;
-  /** "relay" when the quote travelled through Supabase from the agent. */
-  via?: string;
+  provider?: string;
+  warnings?: string[];
 }
 
-export interface Mt5Candle {
+export interface BrokerCandle {
   t: number;
   o: number;
   h: number;
@@ -354,15 +366,16 @@ export interface Mt5Candle {
   v: number;
 }
 
-export interface Mt5CandleSeries {
+export interface BrokerCandleSeries {
   available: boolean;
   symbol: string;
   timeframe: string;
   digits?: number;
-  candles: Mt5Candle[];
+  candles: BrokerCandle[];
   change?: number;
   change_pct?: number;
   reason?: string;
+  provider?: string;
 }
 
 /** Live snapshot of one strategy's paper-trading session. */
@@ -392,17 +405,13 @@ export interface PaperStats {
 export interface AppSettings {
   /**
    * Runtime location of the Python engine. Overrides the build-time
-   * `NEXT_PUBLIC_API_URL`, which is what lets a hosted dashboard reach the
-   * engine running beside your MetaTrader 5 terminal.
+   * `NEXT_PUBLIC_API_URL`, which is what lets a hosted dashboard reach a
+   * self-hosted engine.
    */
   ENGINE_URL: string;
   NEXT_PUBLIC_SUPABASE_URL: string;
   NEXT_PUBLIC_SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
-  MT5_PATH: string;
-  MT5_LOGIN: string;
-  MT5_PASSWORD: string;
-  MT5_SERVER: string;
   OPENAI_API_KEY: string;
   OPENAI_MODEL: string;
   OLLAMA_URL: string;
@@ -425,10 +434,6 @@ export const DEFAULT_SETTINGS: AppSettings = {
   NEXT_PUBLIC_SUPABASE_URL: "",
   NEXT_PUBLIC_SUPABASE_ANON_KEY: "",
   SUPABASE_SERVICE_ROLE_KEY: "",
-  MT5_PATH: "",
-  MT5_LOGIN: "",
-  MT5_PASSWORD: "",
-  MT5_SERVER: "",
   OPENAI_API_KEY: "",
   OPENAI_MODEL: "gpt-4o-mini",
   OLLAMA_URL: "http://localhost:11434",
