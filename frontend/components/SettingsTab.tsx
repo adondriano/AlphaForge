@@ -137,6 +137,7 @@ export default function SettingsTab() {
     brokerCatalogue,
     brokerVaultReady,
     brokerConnections,
+    brokerConnectionsReason,
     connectBroker,
     deleteBrokerConnection,
     refreshBroker,
@@ -387,6 +388,11 @@ export default function SettingsTab() {
         ) : null}
 
         {/* ---- saved connections ---- */}
+        {!brokerConnections.length && brokerConnectionsReason ? (
+          <div className="mb-3 rounded-lg border border-amber-400/20 bg-amber-400/[0.06] px-3 py-2 text-[11px] leading-snug text-amber-200/80">
+            {brokerConnectionsReason}
+          </div>
+        ) : null}
         {brokerConnections.length ? (
           <div className="mb-4 space-y-2">
             {brokerConnections.map((connection) => (

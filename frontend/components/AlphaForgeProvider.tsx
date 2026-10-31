@@ -74,6 +74,8 @@ interface AlphaForgeContextValue {
   brokerCatalogue: BrokerDescriptor[];
   brokerVaultReady: boolean;
   brokerConnections: BrokerConnection[];
+  /** Why the last connection load came back empty, when it did. */
+  brokerConnectionsReason: string;
   paperStats: Record<string, PaperStats>;
   paperBusy: Record<string, boolean>;
   /** Equity series from the most recent backtest of each strategy. */
@@ -197,6 +199,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   const [brokerCatalogue, setBrokerCatalogue] = useState<BrokerDescriptor[]>([]);
   const [brokerVaultReady, setBrokerVaultReady] = useState(false);
   const [brokerConnections, setBrokerConnections] = useState<BrokerConnection[]>([]);
+  const [brokerConnectionsReason, setBrokerConnectionsReason] = useState("");
   const [paperBusy, setPaperBusy] = useState<Record<string, boolean>>({});
   const [paperStats, setPaperStats] = useState<Record<string, PaperStats>>({});
   const [lastCurves, setLastCurves] = useState<Record<string, BacktestCurve>>({});
@@ -371,10 +374,27 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   const refreshBrokerConnections = useCallback(async () => {
     if (!sessionToken) {
       setBrokerConnections([]);
+      setBrokerConnectionsReason("");
       return;
     }
-    const outcome = await api.listBrokerConnections(sessionToken);
+    let outcome = await api.listBrokerConnections(sessionToken);
+    // An expired token reads as "not signed in" from the engine, and the
+    // browser restores its session asynchronously — so on a page refresh the
+    // first attempt can legitimately fail. Refresh the token once and retry
+    // before accepting an empty list, otherwise a reload silently shows no
+    // connections even though they are all still saved.
+    if ((outcome.connections ?? []).length === 0 && outcome.reason) {
+      const client = getSupabaseClient();
+      const refreshed = client
+        ? await client.auth.refreshSession().then((r) => r.data.session, () => null)
+        : null;
+      const fresh = refreshed?.access_token;
+      if (fresh && fresh !== sessionToken) {
+        outcome = await api.listBrokerConnections(fresh);
+      }
+    }
     setBrokerConnections(outcome.connections ?? []);
+    setBrokerConnectionsReason(outcome.reason ?? "");
   }, [sessionToken]);
 
   const connectBroker = useCallback(
@@ -458,10 +478,13 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   );
 
   // Connections are per account, so reload them whenever the user changes.
+  // Waiting for auth first: Supabase restores the session asynchronously, so
+  // running immediately would fire with no token and blank the list.
   useEffect(() => {
+    if (!authReady) return;
     void refreshBrokerConnections();
     void refreshBroker();
-  }, [refreshBrokerConnections, refreshBroker]);
+  }, [authReady, refreshBrokerConnections, refreshBroker]);
 
   /* ------------------------------------------------------------------ */
   /* settings                                                            */
@@ -1168,6 +1191,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       brokerCatalogue,
       brokerVaultReady,
       brokerConnections,
+      brokerConnectionsReason,
       paperStats,
       paperBusy,
       lastCurves,
@@ -1211,6 +1235,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       brokerCatalogue,
       brokerVaultReady,
       brokerConnections,
+      brokerConnectionsReason,
       paperStats,
       paperBusy,
       lastCurves,
