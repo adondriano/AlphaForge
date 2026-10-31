@@ -21,6 +21,7 @@ Two distinct offline states, deliberately different:
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from services import brokers
@@ -36,6 +37,25 @@ from services.brokers.base import (
 
 class BrokerUnavailable(RuntimeError):
     """The connection could not be resolved. Never a reason to crash."""
+
+
+#: A status check is a live probe of the broker. On a cold serverless
+#: instance that is a cold start plus two HTTPS round trips, which is slower
+#: than a browser will wait for a page to render — so the caller gives up,
+#: reports "disconnected", and the check finishes writing "connected" to the
+#: database moments later. Caching the answer keeps page loads fast and stops
+#: every refresh turning into another call to the broker.
+_STATUS_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
+_STATUS_TTL_SECONDS = 60.0
+
+
+def invalidate_status_cache(user_id: Optional[str] = None) -> None:
+    """Drop cached checks for one user, or everyone when called with None."""
+    if user_id is None:
+        _STATUS_CACHE.clear()
+        return
+    for key in [k for k in _STATUS_CACHE if k.startswith(f"{user_id}:")]:
+        _STATUS_CACHE.pop(key, None)
 
 
 class BrokerService:
@@ -117,6 +137,23 @@ class BrokerService:
     def status(
         self, connection_id: Optional[str] = None, user_id: Optional[str] = None
     ) -> Dict[str, Any]:
+        cache_key = f"{user_id}:{connection_id or ''}"
+        if user_id:
+            hit = _STATUS_CACHE.get(cache_key)
+            if hit and (time.time() - hit[1]) < _STATUS_TTL_SECONDS:
+                cached = dict(hit[0])
+                cached["cached"] = True
+                return cached
+
+        result = self._probe_status(connection_id, user_id)
+        if user_id:
+            _STATUS_CACHE[cache_key] = (dict(result), time.time())
+        return result
+
+    def _probe_status(
+        self, connection_id: Optional[str], user_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Ask the broker. Slow; callers should go through ``status``."""
         try:
             provider, creds, row = self.resolve(connection_id, user_id)
         except BrokerUnavailable as exc:

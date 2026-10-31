@@ -576,11 +576,16 @@ export async function brokerStatus(
 ): Promise<BrokerStatus> {
   if (!apiUrl()) return BROKER_UNAVAILABLE;
   const query = connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "";
+  // A status check is a live probe of the broker. On a cold serverless
+  // instance that is a cold start plus two HTTPS round trips, which can take
+  // far longer than a browser waits before deciding the page is broken — and
+  // timing out here silently reports "disconnected" while the engine goes on
+  // to record "connected". Wait long enough to find out.
   try {
-    if (token) return await getAuth<BrokerStatus>(`/api/broker/status${query}`, token, 10000);
-    return await get<BrokerStatus>(`/api/broker/status${query}`, 8000);
+    if (token) return await getAuth<BrokerStatus>(`/api/broker/status${query}`, token, 30000);
+    return await get<BrokerStatus>(`/api/broker/status${query}`, 30000);
   } catch {
-    return BROKER_UNAVAILABLE;
+    return { ...BROKER_UNAVAILABLE, reason: "The engine did not respond in time." };
   }
 }
 

@@ -47,7 +47,7 @@ from pydantic import BaseModel, Field
 try:  # `uvicorn main:app` from inside backend/
     from services import brokers
     from services import llm as llm_service
-    from services.broker_service import brokers_service
+    from services.broker_service import brokers_service, invalidate_status_cache
     from services.broker_vault import vault
     from services.backtester import generate_bars, run_backtest
     from services.optuna_optimizer import optimize as run_optimizer
@@ -64,7 +64,7 @@ try:  # `uvicorn main:app` from inside backend/
 except ImportError:  # pragma: no cover - imported as part of a package
     from .services import brokers
     from .services import llm as llm_service
-    from .services.broker_service import brokers_service
+    from .services.broker_service import brokers_service, invalidate_status_cache
     from .services.broker_vault import vault
     from .services.backtester import generate_bars, run_backtest
     from .services.optuna_optimizer import optimize as run_optimizer
@@ -1410,6 +1410,8 @@ def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # The cached answer is stale now that the credentials have changed.
+    invalidate_status_cache(user_id)
     status = brokers_service.status(connection.get("id"), user_id)
     return {"connection": connection, "status": status}
 
@@ -1419,7 +1421,9 @@ def delete_connection(connection_id: str, request: Request) -> Dict[str, Any]:
     user_id = _user_id_from_request(request)
     if not user_id:
         raise HTTPException(status_code=401, detail=SESSION_EXPIRED_DETAIL)
-    return {"deleted": vault.delete(connection_id, user_id)}
+    deleted = vault.delete(connection_id, user_id)
+    invalidate_status_cache(user_id)
+    return {"deleted": deleted}
 
 
 @app.get("/api/broker/status")

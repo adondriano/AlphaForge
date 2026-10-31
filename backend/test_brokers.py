@@ -22,6 +22,16 @@ from services.broker_vault import (
     public_row,
 )
 from services.brokers.base import instrument_class, shadow_fill
+
+
+@pytest.fixture(autouse=True)
+def _isolate_status_cache():
+    """BrokerService caches checks module-wide; keep that out of other tests."""
+    import services.broker_service as module
+
+    module.invalidate_status_cache()
+    yield
+    module.invalidate_status_cache()
 from services.brokers.exness import (
     DEFAULT_GATEWAY,
     ExnessError,
@@ -753,3 +763,99 @@ def test_blanks_are_still_reported_as_missing():
         "private_key": VECTOR_KEY_HEX,
     }
     assert "Gateway URL" in provider.validate(creds)
+
+
+# ---------------------------------------------------------------------------
+# Status caching
+#
+# A status check probes the broker live. Page loads must not pay that cost on
+# every refresh, and the caller must not give up before the engine answers.
+# ---------------------------------------------------------------------------
+
+class _CountingProvider:
+    """Counts how often the broker is actually contacted."""
+
+    calls = 0
+
+    id = "exness"
+    label = "Exness"
+    unsupported = ()
+
+    @staticmethod
+    def status(creds):
+        _CountingProvider.calls += 1
+        return {"available": True, "connected": True, "mode": "live"}
+
+    @staticmethod
+    def warnings_for(creds):
+        return []
+
+
+def test_status_is_probed_once_then_served_from_cache(monkeypatch):
+    """Repeated page loads must not keep hitting the broker."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    module.invalidate_status_cache()
+    monkeypatch.setattr("services.broker_service.vault", _FakeVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    service = BrokerService()
+    first = service.status(None, "u1")
+    second = service.status(None, "u1")
+
+    assert _CountingProvider.calls == 1
+    assert first["connected"] is True
+    assert second["connected"] is True
+    assert second.get("cached") is True
+
+
+def test_invalidating_after_saving_forces_a_fresh_probe(monkeypatch):
+    """Changing credentials must not keep showing the previous verdict."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    module.invalidate_status_cache()
+    monkeypatch.setattr("services.broker_service.vault", _FakeVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    service = BrokerService()
+    service.status(None, "u1")
+    module.invalidate_status_cache("u1")
+    service.status(None, "u1")
+
+    assert _CountingProvider.calls == 2
+
+
+def test_cache_is_per_user(monkeypatch):
+    """One user's cached check must never be shown to another."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    module.invalidate_status_cache()
+    monkeypatch.setattr("services.broker_service.vault", _FakeVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    service = BrokerService()
+    service.status(None, "alice")
+    service.status(None, "bob")
+
+    assert _CountingProvider.calls == 2
+
+
+def test_unauthenticated_calls_are_never_cached(monkeypatch):
+    """With no user, resolution stops before the broker is ever contacted."""
+    import services.broker_service as module
+
+    _CountingProvider.calls = 0
+    module.invalidate_status_cache()
+    monkeypatch.setattr("services.broker_service.vault", _FakeVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _CountingProvider)
+
+    first = BrokerService().status(None, None)
+    second = BrokerService().status(None, None)
+
+    assert _CountingProvider.calls == 0        # never reaches the broker
+    assert first["connected"] is False
+    assert second["connected"] is False
+    assert second.get("cached") is None        # and nothing was cached
