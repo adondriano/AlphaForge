@@ -10,9 +10,15 @@ you can roll back to, and routes every order through a hard Prop-Firm Shield.
 
 ```
 Live deployment
-  Frontend (Next.js 14)  →  https://alphaforge.vercel.app
+  Frontend (Next.js 14)  →  https://alphaforge-pied.vercel.app
   Engine   (FastAPI)     →  https://alphaforge-engine.vercel.app
 ```
+
+Both projects deploy from this repository's `main` branch: `alphaforge` builds
+`frontend/` as a Next.js app, `alphaforge-engine` builds `backend/` with Vercel's
+FastAPI preset (entrypoint `backend/api/index.py`). The Supabase project is the
+single source of truth — the studio boots straight into three demo strategies,
+each carrying a baseline plus two optimised parameter versions.
 
 ---
 
