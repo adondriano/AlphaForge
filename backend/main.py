@@ -1317,6 +1317,14 @@ def _seed_one(seed: Dict[str, Any]) -> None:
         return
     spec = result.spec
 
+    # Serverless runtimes can cold-start several instances at once, and each
+    # one runs this at boot. Re-read the table right before writing so two
+    # warmers do not plant two copies of the same demo strategy.
+    for existing in store.list_strategies():
+        if (existing.get("symbol") == spec.symbol
+                and existing.get("timeframe") == spec.timeframe):
+            return
+
     row = store.insert_strategy({
         **row_from_spec(spec),
         "status": "draft",
