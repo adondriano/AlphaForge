@@ -111,12 +111,14 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=<anon key>
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt        # full quant stack (optuna / pandas / numpy)
+pip install -r requirements-dev.txt    # full quant stack (optuna / pandas / numpy)
 python main.py                         # → http://localhost:8000/docs
 ```
 
-A slim install also works — `pip install -r api/requirements.txt` gives you the API without
-Optuna/pandas/numpy, and the services degrade to their pure-Python twins automatically.
+A slim install also works — `pip install -r requirements.txt` gives you just the runtime
+dependencies, and the services degrade to their pure-Python twins automatically: the optimizer
+switches from Optuna TPE to its built-in random search, and the backtester to its pure-Python
+series generator. This is the set Vercel installs for the serverless engine.
 
 ### 3. Frontend
 
