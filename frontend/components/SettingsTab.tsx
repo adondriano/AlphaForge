@@ -28,11 +28,8 @@ import { llmProvider } from "@/lib/settings";
 
 type FieldKey = keyof AppSettings;
 
-const MT5_GUIDE_URL =
-  "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-MT5.md";
-
-const MT5_AGENT_GUIDE_URL =
-  "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-MT5.md#path-c--bridge-agent-keep-the-engine-on-vercel";
+const BROKER_GUIDE_URL =
+  "https://github.com/adondriano/AlphaForge/blob/main/docs/CONNECTING-BROKERS.md";
 
 const GROUPS: {
   title: string;
@@ -89,24 +86,6 @@ const GROUPS: {
     ],
   },
   {
-    title: "Execution · MetaTrader 5",
-    icon: <Terminal size={15} />,
-    description:
-      "Windows-only terminal bridge. When it is unavailable AlphaForge fills in shadow mode so the rest of the studio keeps working.",
-    fields: [
-      { key: "MT5_PATH", label: "MT5_PATH", placeholder: "C:\\Program Files\\MetaTrader 5\\terminal.exe" },
-      { key: "MT5_LOGIN", label: "MT5_LOGIN", placeholder: "12345678" },
-      { key: "MT5_SERVER", label: "MT5_SERVER", placeholder: "Broker-Demo" },
-      {
-        key: "MT5_PASSWORD",
-        label: "MT5_PASSWORD",
-        type: "password",
-        placeholder: "••••••••",
-        hint: "Kept in this browser and forwarded to the Python engine only — never to the LLM provider.",
-      },
-    ],
-  },
-  {
     title: "LLM orchestration",
     icon: <Bot size={15} />,
     description:
@@ -153,11 +132,14 @@ export default function SettingsTab() {
     notify,
     canEdit,
     requireAccount,
-    mt5Status,
-    mt5Busy,
-    refreshMt5,
-    connectMt5,
-    disconnectMt5,
+    brokerStatus,
+    brokerBusy,
+    brokerCatalogue,
+    brokerVaultReady,
+    brokerConnections,
+    connectBroker,
+    deleteBrokerConnection,
+    refreshBroker,
     resetEverything,
   } = useAlphaForge();
   const [draft, setDraft] = useState<AppSettings>(settings);
@@ -188,8 +170,32 @@ export default function SettingsTab() {
     }
   };
 
-  const mt5Connected = Boolean(mt5Status?.connected);
-  const mt5Tone: "mint" | "amber" | "neutral" = mt5Connected ? "mint" : "amber";
+  const brokerConnected = Boolean(brokerStatus?.connected);
+  const brokerTone: "mint" | "amber" | "rose" = brokerStatus?.mode === "halted"
+    ? "rose"
+    : brokerConnected
+      ? "mint"
+      : "amber";
+
+  // The connection form. One provider at a time, rendered from its own field
+  // descriptors so a new broker needs no new React.
+  const [brokerProvider, setBrokerProvider] = useState<string>("");
+  const [brokerDraft, setBrokerDraft] = useState<Record<string, string>>({});
+  const [brokerRevealed, setBrokerRevealed] = useState<Record<string, boolean>>({});
+
+  const activeProvider = brokerCatalogue.find((entry) => entry.id === brokerProvider);
+  const savedForProvider = brokerConnections.find((entry) => entry.provider === brokerProvider);
+
+  const pickProvider = (id: string) => {
+    setBrokerProvider(id);
+    setBrokerDraft({});
+    setBrokerRevealed({});
+  };
+
+  const connectSelected = async () => {
+    if (!brokerProvider) return;
+    await connectBroker(brokerProvider, brokerDraft);
+  };
 
   return (
     <div className="space-y-4">
@@ -299,107 +305,251 @@ export default function SettingsTab() {
         </div>
       ))}
 
-      <div className={cx("panel p-5", mt5Connected ? "border-forge-mint/25" : "border-forge-amber/25")}>
+      <div
+        className={cx(
+          "panel p-5",
+          brokerStatus?.mode === "halted"
+            ? "border-forge-rose/25"
+            : brokerConnected
+              ? "border-forge-mint/25"
+              : "border-forge-amber/25",
+        )}
+      >
         <div className="mb-1 flex items-center gap-2">
-          {mt5Connected ? (
+          {brokerConnected ? (
             <PlugZap size={15} className="text-forge-mint" />
           ) : (
             <Plug size={15} className="text-forge-amber" />
           )}
-          <h3 className="text-sm font-semibold text-white">MetaTrader 5 bridge</h3>
-          <Badge tone={mt5Tone}>{mt5Connected ? "connected" : "disconnected"}</Badge>
-          <Badge tone="neutral">{mt5Status?.mode ?? "shadow"}</Badge>
-          {mt5Status?.relay ? (
-            <Badge tone="cyan" title={`Last heartbeat ${mt5Status.relay.age_seconds ?? "?"}s ago`}>
-              via bridge · {mt5Status.relay.name}
+          <h3 className="text-sm font-semibold text-white">Broker connection</h3>
+          <Badge tone={brokerTone}>{brokerConnected ? "connected" : "disconnected"}</Badge>
+          <Badge tone="neutral">{brokerStatus?.mode ?? "shadow"}</Badge>
+          {brokerStatus?.provider ? (
+            <Badge tone="cyan">
+              {brokerCatalogue.find((entry) => entry.id === brokerStatus.provider)?.label ??
+                brokerStatus.provider}
             </Badge>
           ) : null}
         </div>
         <p className="mb-4 text-[12px] leading-relaxed text-white/40">
-          {mt5Connected
-            ? mt5Status?.relay
-              ? `Live quotes and order routing are relayed over Supabase by the bridge agent "${mt5Status.relay.name}" running next to your terminal.`
-              : "Live quotes and order routing are active through the Python engine."
-            : "Fill in MT5_PATH, MT5_LOGIN, MT5_SERVER and MT5_PASSWORD, run the Python engine on the Windows machine that hosts your terminal, then connect. Until then every fill is simulated locally so the studio stays fully usable."}
-          {mt5Status?.reason ? (
+          {brokerStatus?.mode === "halted"
+            ? "A connection is saved but the broker is not accepting it. Trading is halted — no paper fill is substituted, so a broken broker can never look like a working one."
+            : brokerConnected
+              ? "Live quotes and order routing are active. The engine talks to your broker over its public API — no local terminal, no tunnel, no background agent."
+              : "Connect a broker to stream real prices and route live orders. Until then every fill is a paper fill so the studio stays fully usable."}
+          {brokerStatus?.reason ? (
             <>
               {" "}
-              <span className="text-white/55">Engine says: {mt5Status.reason}</span>
+              <span className="text-white/55">Engine says: {brokerStatus.reason}</span>
             </>
           ) : null}{" "}
           <a
-            href={MT5_GUIDE_URL}
+            href={BROKER_GUIDE_URL}
             target="_blank"
             rel="noreferrer"
             className="text-forge-cyan underline decoration-dotted underline-offset-2 hover:text-white"
           >
             Full step-by-step setup guide →
-          </a>{" "}
-          <a
-            href={MT5_AGENT_GUIDE_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="text-forge-violet underline decoration-dotted underline-offset-2 hover:text-white"
-          >
-            Bridge agent (keeps the engine on Vercel) →
           </a>
         </p>
-        {mt5Connected && mt5Status?.account ? (
+
+        {brokerStatus?.warnings?.length ? (
+          <div className="mb-4 rounded-lg border border-forge-amber/25 bg-forge-amber/5 px-3 py-2">
+            {brokerStatus.warnings.map((warning) => (
+              <p key={warning} className="text-[12px] leading-relaxed text-forge-amber">
+                {warning}
+              </p>
+            ))}
+          </div>
+        ) : null}
+
+        {brokerConnected && brokerStatus?.account ? (
           <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <AccountCell label="Account" value={String(mt5Status.account.login ?? "—")} />
-            <AccountCell label="Server" value={mt5Status.account.server ?? "—"} />
+            <AccountCell label="Account" value={String(brokerStatus.account.login ?? "—")} />
+            <AccountCell label="Server" value={brokerStatus.account.server ?? "—"} />
             <AccountCell
               label="Balance"
               value={
-                mt5Status.account.balance != null
-                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.balance.toFixed(2)}`
+                brokerStatus.account.balance != null
+                  ? `${brokerStatus.account.currency ?? ""} ${brokerStatus.account.balance.toFixed(2)}`
                   : "—"
               }
             />
             <AccountCell
               label="Equity"
               value={
-                mt5Status.account.equity != null
-                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.equity.toFixed(2)}`
+                brokerStatus.account.equity != null
+                  ? `${brokerStatus.account.currency ?? ""} ${brokerStatus.account.equity.toFixed(2)}`
                   : "—"
               }
             />
           </div>
         ) : null}
-        <div className="flex flex-wrap items-center gap-2">
-          {mt5Connected ? (
-            <button
-              className="btn-ghost text-[12px]"
-              disabled={mt5Busy || !canEdit}
-              onClick={() => void disconnectMt5()}
-            >
-              {mt5Busy ? <Spinner /> : <Plug size={14} />} Disconnect
-            </button>
-          ) : (
-            <button
-              className="btn-primary text-[12px]"
-              disabled={mt5Busy || !canEdit}
-              onClick={async () => {
-                await updateSettings(draft);
-                await connectMt5();
-              }}
-            >
-              {mt5Busy ? <Spinner /> : <PlugZap size={14} />} Save &amp; connect
-            </button>
-          )}
-          <button
-            className="btn-ghost text-[12px]"
-            disabled={mt5Busy}
-            onClick={() => void refreshMt5()}
-          >
-            {mt5Busy ? <Spinner /> : <RefreshCw size={14} />} Refresh status
-          </button>
-          {!canEdit ? (
-            <span className="text-[11px] text-white/35">
-              Sign in to open or close the terminal bridge.
-            </span>
-          ) : null}
-        </div>
+
+        {/* ---- saved connections ---- */}
+        {brokerConnections.length ? (
+          <div className="mb-4 space-y-2">
+            {brokerConnections.map((connection) => (
+              <div
+                key={connection.id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-[13px] font-semibold text-white/85">
+                    {connection.label ||
+                      brokerCatalogue.find((entry) => entry.id === connection.provider)?.label ||
+                      connection.provider}
+                  </div>
+                  <div className="text-[11px] text-white/35">
+                    {connection.last_status
+                      ? `Last check: ${connection.last_status}`
+                      : "Never checked"}
+                  </div>
+                </div>
+                <button
+                  className="btn-ghost text-[12px]"
+                  disabled={brokerBusy || !canEdit}
+                  onClick={() => void deleteBrokerConnection(connection.id)}
+                >
+                  <Trash2 size={13} /> Remove
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {/* ---- connect form ---- */}
+        {!canEdit ? (
+          <p className="text-[11px] text-white/35">
+            Sign in to connect a broker — credentials are stored against your account, encrypted.
+          </p>
+        ) : (
+          <div className="space-y-3 rounded-lg border border-white/[0.07] bg-white/[0.02] p-3">
+            <div className="grid gap-3 sm:grid-cols-[minmax(0,220px)_1fr]">
+              <label className="block">
+                <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">
+                  Broker
+                </span>
+                <select
+                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-[13px] text-white/85 outline-none focus:border-forge-cyan/40"
+                  value={brokerProvider}
+                  onChange={(event) => pickProvider(event.target.value)}
+                >
+                  <option value="">Select a broker…</option>
+                  {brokerCatalogue.map((entry) => (
+                    <option key={entry.id} value={entry.id}>
+                      {entry.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {activeProvider ? (
+                <div className="flex items-end gap-2">
+                  <a
+                    href={activeProvider.docs_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[12px] text-forge-cyan underline decoration-dotted underline-offset-2 hover:text-white"
+                  >
+                    Where do I get these? →
+                  </a>
+                  {savedForProvider ? (
+                    <span className="text-[11px] text-forge-mint">
+                      Saved — submitting replaces it.
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {activeProvider ? (
+              <div className="grid gap-3 sm:grid-cols-2">
+                {activeProvider.fields.map((field) => (
+                  <label key={field.key} className="block">
+                    <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/35">
+                      {field.label}
+                      {field.required ? "" : " (optional)"}
+                    </span>
+                    <div className="relative">
+                      <input
+                        className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 pr-9 text-[13px] text-white/85 outline-none focus:border-forge-cyan/40"
+                        type={
+                          field.secret && !brokerRevealed[field.key] ? "password" : "text"
+                        }
+                        placeholder={field.placeholder}
+                        value={brokerDraft[field.key] ?? ""}
+                        onChange={(event) =>
+                          setBrokerDraft((current) => ({
+                            ...current,
+                            [field.key]: event.target.value,
+                          }))
+                        }
+                      />
+                      {field.secret ? (
+                        <button
+                          type="button"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 text-white/35 hover:text-white"
+                          onClick={() =>
+                            setBrokerRevealed((current) => ({
+                              ...current,
+                              [field.key]: !current[field.key],
+                            }))
+                          }
+                          aria-label={`Reveal ${field.label}`}
+                        >
+                          {brokerRevealed[field.key] ? (
+                            <EyeOff size={14} />
+                          ) : (
+                            <Eye size={14} />
+                          )}
+                        </button>
+                      ) : null}
+                    </div>
+                    {field.help ? (
+                      <span className="mt-1 block text-[11px] leading-snug text-white/30">
+                        {field.help}
+                      </span>
+                    ) : null}
+                  </label>
+                ))}
+              </div>
+            ) : null}
+
+            {activeProvider?.unsupported.length ? (
+              <p className="text-[11px] leading-snug text-forge-amber/80">
+                Heads up: this broker does not offer{" "}
+                {activeProvider.unsupported
+                  .map((kind) => (kind === "index" ? "indices" : `${kind} instruments`))
+                  .join(" and ")}{" "}
+                through its API. Strategies on those symbols will be halted rather than
+                paper-filled.
+              </p>
+            ) : null}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                className="btn-primary text-[12px]"
+                disabled={brokerBusy || !brokerProvider || !brokerVaultReady}
+                onClick={() => void connectSelected()}
+              >
+                {brokerBusy ? <Spinner /> : <PlugZap size={14} />} Save &amp; connect
+              </button>
+              <button
+                className="btn-ghost text-[12px]"
+                disabled={brokerBusy}
+                onClick={() => void refreshBroker()}
+              >
+                {brokerBusy ? <Spinner /> : <RefreshCw size={14} />} Refresh status
+              </button>
+              {!brokerVaultReady ? (
+                <span className="text-[11px] text-white/35">
+                  Credential storage is not configured on the engine — set
+                  NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.
+                </span>
+              ) : null}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="panel border-forge-rose/25 p-5">

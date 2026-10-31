@@ -374,41 +374,60 @@ def test_backtest_curve_is_downsampled(client):
 
 
 # ---------------------------------------------------------------------------
-# MetaTrader 5 bridge
+# Broker connections
 # ---------------------------------------------------------------------------
-def test_mt5_status_exposes_credentials_state(client):
-    payload = client.get("/api/mt5/status").json()
-    assert "available" in payload and "connected" in payload and "mode" in payload
-    creds = payload["credentials"]
-    for key in ("login", "password", "server", "path"):
-        assert isinstance(creds[key], bool)
+def test_broker_catalogue_lists_every_provider(client):
+    payload = client.get("/api/brokers").json()
+    ids = {p["id"] for p in payload["providers"]}
+    assert {"exness", "oanda", "capitalcom", "ig", "ctrader"} <= ids
+    for provider in payload["providers"]:
+        # The Settings tab renders the form from these descriptors, so every
+        # provider must declare at least one credential field.
+        assert provider["fields"], f"{provider['id']} declares no fields"
 
 
-def test_mt5_connect_without_terminal_reports_a_reason(client):
-    payload = client.post(
-        "/api/mt5/connect", json={"login": "1", "password": "x", "server": "y"}
-    ).json()
-    assert payload["connected"] is False
-    assert payload["reason"], "the UI needs an explanation, not a silent failure"
+def test_broker_endpoints_report_a_reason_with_no_connection(client):
+    """No connection means no invented numbers — only an explanation."""
+    status = client.get("/api/broker/status").json()
+    assert status["connected"] is False
+    assert status["reason"]
 
-
-def test_mt5_market_data_degrades_without_terminal(client):
-    price = client.get("/api/mt5/price", params={"symbol": "XAUUSD"}).json()
+    price = client.get("/api/broker/price", params={"symbol": "XAUUSD"}).json()
     assert price["available"] is False
     assert price["symbol"] == "XAUUSD"
-    assert price.get("reason")
+    assert price["reason"]
 
     candles = client.get(
-        "/api/mt5/candles", params={"symbol": "XAUUSD", "timeframe": "H1", "count": 50}
+        "/api/broker/candles", params={"symbol": "XAUUSD", "timeframe": "H1", "count": 50}
     ).json()
     assert candles["available"] is False
     assert candles["candles"] == []
     assert candles["reason"]
 
 
-def test_mt5_disconnect_is_safe(client):
-    payload = client.post("/api/mt5/disconnect").json()
-    assert payload["connected"] is False
+def test_broker_connections_require_sign_in(client):
+    response = client.get("/api/broker/connections")
+    assert response.status_code == 200
+    assert response.json()["connections"] == []
+    assert response.json()["reason"]
+
+    response = client.post(
+        "/api/broker/connections", json={"provider": "exness", "credentials": {}}
+    )
+    assert response.status_code == 401
+
+
+def test_saving_a_connection_rejects_unknown_providers(client, monkeypatch):
+    """Guards against a typo silently creating a row nobody can route."""
+    from main import _user_id_from_request
+
+    monkeypatch.setattr("main._user_id_from_request", lambda request: "user-1")
+    response = client.post(
+        "/api/broker/connections",
+        json={"provider": "not-a-broker", "credentials": {}},
+    )
+    assert response.status_code == 400
+    assert "not-a-broker" in response.json()["detail"]
 
 
 # ---------------------------------------------------------------------------

@@ -60,7 +60,7 @@ each carrying a baseline plus two optimised parameter versions.
                   ▼
         Prop-Firm Shield (hard middleware)
                   ▼
-      Execution — MetaTrader 5 (Windows) ▸ shadow fill elsewhere
+      Execution — broker API (Exness, OANDA, Capital.com, IG, cTrader) ▸ paper fill elsewhere
 ```
 
 **Two runtimes, one codebase:**
@@ -88,7 +88,7 @@ psql "$DATABASE_URL" -f backend/schema.sql
 | `optimizations` | Immutable parameter versions. Unique `(strategy_id, version)` plus a partial unique index guaranteeing exactly one active version per strategy. |
 | `trade_logs` | Shadow / paper / live executions with the full Prop-Firm Shield audit trail (`day_pnl_pct`, `total_pnl_pct`, `blocked_reason`). |
 | `app_settings` | Single-row settings document persisted from the Settings tab. |
-| `mt5_bridges` / `mt5_quotes` / `mt5_candles` / `mt5_commands` | Windows-side bridge agent relay (Path C). Service-role only — no anon or authenticated policy. |
+| `broker_connections` | Encrypted per-user broker credentials. AES-256-GCM, RLS to the owner, ciphertext never returned to the browser. |
 
 All four tables are added to the `supabase_realtime` publication with `REPLICA IDENTITY FULL`, and
 row level security is enabled with single-tenant permissive policies (tighten these before exposing
@@ -164,22 +164,28 @@ Python engine):
 Resolution order: **Settings tab → environment variable → default**. Secrets are never written to
 browser storage; they live in memory for the session and in server-side env vars in production.
 
-### 🔌 Connecting a local MetaTrader 5 terminal
+### 🔌 Connecting a broker
 
-`MetaTrader5` is a Windows-only C extension that attaches to a terminal on the *same* machine, so
-a hosted deployment can never reach it directly. AlphaForge supports three ways to close that gap —
-see **[`docs/CONNECTING-MT5.md`](docs/CONNECTING-MT5.md)** for the full step-by-step guide:
+AlphaForge talks to brokers over their public HTTP APIs, so a hosted deployment reaches your
+account directly — no local terminal, no background agent, no tunnel.
 
-| Path | Runs on your Windows PC | Engine location |
-| --- | --- | --- |
-| **A — local** | Engine + dashboard | your PC |
-| **B — tunnel** | Engine, exposed over HTTPS | your PC |
-| **C — bridge agent** | `backend/bridge_agent.py` only | stays on Vercel |
+| Broker | Authentication |
+| --- | --- |
+| **Exness** | Ed25519 request signing |
+| **OANDA** | Bearer token |
+| **Capital.com** | Session token |
+| **IG** | Session token |
+| **cTrader** (IC Markets, Pepperstone…) | OAuth bearer token |
 
-Path C is the relay: the agent imports `MetaTrader5`, pushes quotes into `mt5_quotes` and answers
-work from `mt5_commands`, while the hosted engine drives it over Supabase. No tunnel, no public URL,
-and it works behind CGNAT. `mt5_commands` is service-role-only — it carries order instructions, so
-no anon or authenticated policy exists for it.
+See **[`docs/CONNECTING-BROKERS.md`](docs/CONNECTING-BROKERS.md)** for the full walkthrough.
+
+Credentials are encrypted with AES-256-GCM before they touch the database, using a key from
+`ALPHAFORGE_CRED_KEY` that never lives in the database itself. Row-level security scopes each
+connection to its owner, and the ciphertext is never serialised back to the browser.
+
+Two offline states, deliberately distinct: with **no** connection orders are paper-filled
+(`shadow`); with a **broken** connection trading is `halted` and no paper fill is substituted, so
+a dead broker can never look like a working one.
 
 ---
 
@@ -246,7 +252,7 @@ AlphaForge
 │   ├── requirements.txt        full local quant stack
 │   ├── api/                    Vercel serverless entrypoint (slim requirements)
 │   ├── services/               backtester · optuna_optimizer · python_analyzer
-│   │                           validator · risk · llm · mt5_executor · store
+│   │                           validator · risk · llm · brokers · store
 │   └── tests/                  mock_postgrest (offline client test harness)
 ├── .env.example
 └── vercel.json

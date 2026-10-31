@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 import {
   Activity,
@@ -36,10 +37,7 @@ export default function DashboardPage() {
     toggleAutonomous,
     notify,
     canEdit,
-    mt5Status,
-    mt5Busy,
-    connectMt5,
-    disconnectMt5,
+    brokerStatus,
     paperStats,
     paperBusy,
     togglePaperTrading,
@@ -135,10 +133,14 @@ export default function DashboardPage() {
       <div
         className={cx(
           "panel flex flex-wrap items-center gap-3 px-4 py-3",
-          mt5Status?.connected ? "border-forge-mint/25" : "border-forge-amber/25",
+          brokerStatus?.mode === "halted"
+            ? "border-forge-rose/25"
+            : brokerStatus?.connected
+              ? "border-forge-mint/25"
+              : "border-forge-amber/25",
         )}
       >
-        {mt5Status?.connected ? (
+        {brokerStatus?.connected ? (
           <PlugZap size={16} className="text-forge-mint" />
         ) : (
           <Plug size={16} className="text-forge-amber" />
@@ -146,53 +148,39 @@ export default function DashboardPage() {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[13px] font-semibold text-white">
-              {mt5Status?.configured === false
-                ? "MetaTrader 5 not configured"
-                : mt5Status?.connected
-                  ? "MetaTrader 5 connected"
-                  : "MetaTrader 5 disconnected"}
+              {brokerStatus?.mode === "halted"
+                ? "Broker connection halted"
+                : brokerStatus?.connected
+                  ? "Broker connected"
+                  : "No broker connected"}
             </span>
-            <Badge tone={mt5Status?.connected ? "mint" : "amber"}>
-              {mt5Status?.connected ? "live feed" : "no feed"}
+            <Badge tone={brokerStatus?.connected ? "mint" : "amber"}>
+              {brokerStatus?.connected ? "live feed" : "no feed"}
             </Badge>
-            {mt5Status?.connected && mt5Status.account ? (
+            {brokerStatus?.connected && brokerStatus.account ? (
               <span className="tabular text-[11px] text-white/45">
-                #{mt5Status.account.login} · {mt5Status.account.server} ·{" "}
-                {mt5Status.account.balance != null
-                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.balance.toFixed(2)}`
+                #{brokerStatus.account.login} · {brokerStatus.account.server} ·{" "}
+                {brokerStatus.account.balance != null
+                  ? `${brokerStatus.account.currency ?? ""} ${brokerStatus.account.balance.toFixed(2)}`
                   : "balance n/a"}
               </span>
             ) : null}
           </div>
           <div className="text-[11.5px] text-white/45">
-            {mt5Status?.connected
+            {brokerStatus?.connected
               ? "Feeding live ticks into the Prop-Firm Shield and the strategy live chart."
-              : (mt5Status?.reason ??
-                "Charts, backtests and analysis work without MT5. Live prices and real execution need the Python engine running on the machine that hosts your MT5 terminal.")}
+              : (brokerStatus?.reason ??
+                "Charts, backtests and analysis work without a broker. Live prices and real execution need one connected in Settings.")}
           </div>
         </div>
         <div className="ml-auto flex items-center gap-2">
           {armedPaper ? (
             <Badge tone="cyan">{armedPaper} paper session(s) armed</Badge>
           ) : null}
-          {canEdit ? (
-            mt5Status?.connected ? (
-              <button
-                className="btn-ghost text-[12px]"
-                disabled={mt5Busy}
-                onClick={() => void disconnectMt5()}
-              >
-                {mt5Busy ? <Spinner /> : <Plug size={14} />} Disconnect
-              </button>
-            ) : (
-              <button
-                className="btn-ghost text-[12px]"
-                disabled={mt5Busy}
-                onClick={() => void connectMt5()}
-              >
-                {mt5Busy ? <Spinner /> : <PlugZap size={14} />} Connect MT5
-              </button>
-            )
+          {canEdit && !brokerStatus?.connected ? (
+            <Link href="/settings" className="btn-ghost text-[12px]">
+              <PlugZap size={14} /> Connect a broker
+            </Link>
           ) : null}
         </div>
       </div>

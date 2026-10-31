@@ -23,10 +23,8 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "NEXT_PUBLIC_SUPABASE_ANON_KEY": "",
     "SUPABASE_SERVICE_ROLE_KEY": "",
     # ---- Execution ------------------------------------------------------
-    "MT5_PATH": "",
-    "MT5_LOGIN": "",
-    "MT5_PASSWORD": "",
-    "MT5_SERVER": "",
+    # Broker credentials are not settings: they are stored encrypted per user
+    # in `broker_connections` by services.broker_vault.
     # ---- LLM orchestration ----------------------------------------------
     "OPENAI_API_KEY": "",
     "OPENAI_MODEL": "gpt-4o-mini",
@@ -47,7 +45,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "AUTONOMOUS_DEFAULT": False,
 }
 
-SECRET_KEYS = {"SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "MT5_PASSWORD"}
+SECRET_KEYS = {"SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY"}
 
 
 class SettingsUpdate(BaseModel):
@@ -57,10 +55,6 @@ class SettingsUpdate(BaseModel):
     NEXT_PUBLIC_SUPABASE_URL: str | None = None
     NEXT_PUBLIC_SUPABASE_ANON_KEY: str | None = None
     SUPABASE_SERVICE_ROLE_KEY: str | None = None
-    MT5_PATH: str | None = None
-    MT5_LOGIN: str | None = None
-    MT5_PASSWORD: str | None = None
-    MT5_SERVER: str | None = None
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str | None = None
     OLLAMA_URL: str | None = None
@@ -87,10 +81,6 @@ class Settings(BaseModel):
     NEXT_PUBLIC_SUPABASE_URL: str = ""
     NEXT_PUBLIC_SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
-    MT5_PATH: str = ""
-    MT5_LOGIN: str = ""
-    MT5_PASSWORD: str = ""
-    MT5_SERVER: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
     OLLAMA_URL: str = "http://localhost:11434"
@@ -124,12 +114,6 @@ class Settings(BaseModel):
         if not url or url in {"http://localhost:11434", "http://127.0.0.1:11434"}:
             return ""
         return url
-
-    @property
-    def has_mt5(self) -> bool:
-        """Credentials present. MT5_PATH is optional — ``initialize()`` finds
-        the installed terminal on its own when it is blank."""
-        return bool(self.MT5_LOGIN and self.MT5_PASSWORD and self.MT5_SERVER)
 
     @property
     def llm_provider(self) -> str:
