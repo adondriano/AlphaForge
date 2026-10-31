@@ -441,3 +441,88 @@ def test_reset_wipes_the_store(client):
     assert len(client.get("/api/strategies").json()["strategies"]) == 0
     # restore for anything that runs afterwards
     client.post("/api/seed", params={"force": True})
+
+
+def test_broker_auth_falls_back_to_service_role_key(monkeypatch):
+    """A missing anon key must not silently 401 every broker endpoint.
+
+    The engine deployment once had no NEXT_PUBLIC_SUPABASE_ANON_KEY set, so
+    GoTrue rejected the call and every broker request failed with a 401 that
+    looked exactly like the broker rejecting credentials.
+    """
+    import main
+
+    captured = {}
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"id": "user-1"}
+
+    def fake_get(url, headers, timeout):
+        captured.update(url=url, headers=headers)
+        return _Response()
+
+    monkeypatch.setattr(main.httpx, "get", fake_get)
+    monkeypatch.setattr(main, "get_settings", lambda: _Settings(anon="", service="service-key"))
+
+    assert main._user_id_from_request(_Request()) == "user-1"
+    assert captured["headers"]["apikey"] == "service-key"
+
+
+def test_broker_auth_prefers_anon_key(monkeypatch):
+    """When the anon key is present it is the one sent."""
+    import main
+
+    captured = {}
+
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"id": "user-2"}
+
+    def fake_get(url, headers, timeout):
+        captured.update(headers=headers)
+        return _Response()
+
+    monkeypatch.setattr(main.httpx, "get", fake_get)
+    monkeypatch.setattr(main, "get_settings", lambda: _Settings(anon="anon-key", service="srk"))
+
+    assert main._user_id_from_request(_Request()) == "user-2"
+    assert captured["headers"]["apikey"] == "anon-key"
+
+
+def test_broker_auth_rejects_unverifiable_token(monkeypatch):
+    """A token GoTrue rejects yields no user, never a partial id."""
+    import main
+
+    class _Response:
+        status_code = 401
+
+        @staticmethod
+        def json():
+            return {"msg": "nope"}
+
+    monkeypatch.setattr(main.httpx, "get", lambda *a, **k: _Response())
+    monkeypatch.setattr(main, "get_settings", lambda: _Settings(anon="a", service="s"))
+
+    assert main._user_id_from_request(_Request()) is None
+
+
+class _Settings:
+    """Minimal settings stand-in for the broker auth tests."""
+
+    def __init__(self, anon: str, service: str):
+        self.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co"
+        self.NEXT_PUBLIC_SUPABASE_ANON_KEY = anon
+        self.SUPABASE_SERVICE_ROLE_KEY = service
+
+
+class _Request:
+    """Minimal Request stand-in carrying a bearer token."""
+
+    headers = {"authorization": "Bearer a.good.token"}

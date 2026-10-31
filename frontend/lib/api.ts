@@ -135,6 +135,36 @@ async function get<T>(path: string, timeoutMs = 8000): Promise<T> {
  * user id from the body because these keys move real money. The caller's
  * Supabase JWT rides along in the Authorization header instead.
  */
+/**
+ * Status line plus the server's own `detail`.
+ *
+ * Throwing only `${response.status} ${response.statusText}` produced messages
+ * like "401 Unauthorized", which tell the user nothing and — worse — look
+ * identical whether the broker rejected credentials or our own engine refused
+ * the session token.
+ */
+async function authErrorMessage(response: Response): Promise<string> {
+  let detail = "";
+  try {
+    const payload: unknown = await response.json();
+    const record = (payload && typeof payload === "object" ? payload : {}) as Record<
+      string,
+      unknown
+    >;
+    const candidate = record.detail ?? record.message ?? record.error;
+    detail =
+      typeof candidate === "string"
+        ? candidate
+        : candidate
+          ? JSON.stringify(candidate).slice(0, 200)
+          : "";
+  } catch {
+    /* empty or non-JSON body — the status line is all we have */
+  }
+  const head = `${response.status} ${response.statusText}`;
+  return detail ? `${head} — ${detail}` : head;
+}
+
 async function getAuth<T>(path: string, token: string, timeoutMs = 8000): Promise<T> {
   if (!apiUrl()) throw new Error("no api url");
   const controller = new AbortController();
@@ -144,7 +174,7 @@ async function getAuth<T>(path: string, token: string, timeoutMs = 8000): Promis
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    if (!response.ok) throw new Error(await authErrorMessage(response));
     return (await response.json()) as T;
   } finally {
     clearTimeout(timer);
@@ -167,7 +197,7 @@ async function requestAuth<T>(
       body: JSON.stringify(body ?? {}),
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    if (!response.ok) throw new Error(await authErrorMessage(response));
     return (await response.json()) as T;
   } finally {
     clearTimeout(timer);
@@ -184,7 +214,7 @@ async function deleteAuth<T>(path: string, token: string, timeoutMs = 15000): Pr
       headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    if (!response.ok) throw new Error(await authErrorMessage(response));
     return (await response.json()) as T;
   } finally {
     clearTimeout(timer);
@@ -576,7 +606,12 @@ export async function saveBrokerConnection(
     label?: string;
     connection_id?: string;
   },
-): Promise<{ connection: BrokerConnection; status: BrokerStatus; error?: string }> {
+): Promise<{
+  connection: BrokerConnection;
+  status: BrokerStatus;
+  error?: string;
+  authFailed?: boolean;
+}> {
   if (!apiUrl()) {
     return { connection: {} as BrokerConnection, status: BROKER_UNAVAILABLE };
   }
@@ -588,10 +623,17 @@ export async function saveBrokerConnection(
       20000,
     );
   } catch (err) {
+    const message = String((err as Error)?.message ?? err);
+    // A 401/403 here is the engine refusing our session token, not the broker
+    // rejecting credentials. Callers must not report it as "could not reach
+    // <broker>", or the user re-checks API keys that were never transmitted.
+    const status = Number.parseInt(message, 10);
+    const authFailed = status === 401 || status === 403;
     return {
       connection: {} as BrokerConnection,
-      status: { ...BROKER_UNAVAILABLE, reason: String((err as Error)?.message ?? err) },
-      error: String((err as Error)?.message ?? err),
+      status: { ...BROKER_UNAVAILABLE, reason: message },
+      error: message,
+      authFailed,
     };
   }
 }

@@ -405,6 +405,17 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
               ? `Account ${outcome.status.account.login}`
               : "Live quotes and execution are now available.",
           });
+        } else if (outcome.authFailed) {
+          // The engine refused the session token, so nothing was sent to the
+          // broker. Saying "could not reach <broker>" here would send the user
+          // to re-check API keys that were never transmitted.
+          notify({
+            kind: "error",
+            title: "Your session expired",
+            detail:
+              outcome.error ??
+              "AlphaForge could not verify your sign-in. Sign out and back in, then try again.",
+          });
         } else {
           notify({
             kind: "error",

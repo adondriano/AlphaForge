@@ -207,6 +207,7 @@ and the order is **halted**, not paper-filled.
 | "Sign in to connect a broker" | Connections are per account. Log in first |
 | "Credential storage is not configured" | The engine needs `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. See §4 |
 | "Could not decrypt stored credentials" | `ALPHAFORGE_CRED_KEY` changed. Re-enter the credentials |
+| **"401 Unauthorized" / "Your session expired"** | The engine could not verify your Supabase token, so the credentials were **never sent** — no broker was contacted. Sign out and back in. If it persists, the engine deployment is missing `NEXT_PUBLIC_SUPABASE_ANON_KEY` (it needs its own copy; it is not shared with the dashboard) |
 | **`Exness 401` with no error code** | Almost always the **Gateway URL**. Exness issues the HTTPS Gateway per account in Key Management's DNS widget — there is no public default, and the placeholder in the form is only an example. Paste the exact value Exness shows |
 | **`Exness 401 (1000)`** `AUTH_INVALID_API_KEY` | Exness does not recognise that API key. Re-copy the whole `exnsk-…` value with no stray spaces, confirm it is still active, and confirm eligibility (region-limited, Exness Terminal account only) |
 | **`Exness 401 (1001)`** `AUTH_INVALID_SIGNATURE` | The private key does not belong to that API key. Exness shows the private key **once** — if it was not saved at creation, generate a new key pair and paste both halves in together |

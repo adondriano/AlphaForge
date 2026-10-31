@@ -1303,6 +1303,18 @@ class ResetRequest(BaseModel):
     reseed: bool = False
 
 
+#: Shown when the caller's token cannot be verified.
+#:
+#: It deliberately says the credentials were *not sent*: the alternative —
+#: "Sign in to connect a broker" — reads like a broker rejecting the
+#: credentials, which sends the user off to re-check API keys that never left
+#: the request. This failure is about the session, not the broker.
+SESSION_EXPIRED_DETAIL = (
+    "Your session could not be verified, so the credentials were not sent to "
+    "the broker. Sign out and sign back in, then try again."
+)
+
+
 def _user_id_from_request(request: Request) -> Optional[str]:
     """Verify the caller's Supabase JWT and return their user id.
 
@@ -1322,12 +1334,23 @@ def _user_id_from_request(request: Request) -> Optional[str]:
     base = (settings.NEXT_PUBLIC_SUPABASE_URL or "").rstrip("/")
     if not base:
         return None
+
+    # GoTrue needs *some* project key in `apikey`. The anon key is the right
+    # one, but if it is not configured on this deployment the service role key
+    # still authenticates the call — using it here only reads the caller's own
+    # profile, and it beats returning None, which silently turns every broker
+    # endpoint into a 401 that looks like a broker rejecting credentials.
+    apikey = (
+        settings.NEXT_PUBLIC_SUPABASE_ANON_KEY
+        or settings.SUPABASE_SERVICE_ROLE_KEY
+        or ""
+    )
     try:
         response = httpx.get(
             f"{base}/auth/v1/user",
             headers={
                 "Authorization": f"Bearer {token}",
-                "apikey": settings.NEXT_PUBLIC_SUPABASE_ANON_KEY or "",
+                "apikey": apikey,
             },
             timeout=8.0,
         )
@@ -1361,7 +1384,7 @@ def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[
     """Validate, store encrypted, then report whether it actually works."""
     user_id = _user_id_from_request(request)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Sign in to connect a broker.")
+        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_DETAIL)
 
     provider = brokers.get(payload.provider)
     if provider is None:
@@ -1395,7 +1418,7 @@ def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[
 def delete_connection(connection_id: str, request: Request) -> Dict[str, Any]:
     user_id = _user_id_from_request(request)
     if not user_id:
-        raise HTTPException(status_code=401, detail="Sign in to manage broker connections.")
+        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_DETAIL)
     return {"deleted": vault.delete(connection_id, user_id)}
 
 
