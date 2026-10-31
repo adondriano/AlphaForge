@@ -237,6 +237,7 @@ def _detect_source_type(url: str, explicit: str = "") -> str:
 # ---------------------------------------------------------------------------
 class CreateRequest(BaseModel):
     name: Optional[str] = None
+    user_id: Optional[str] = None
     source_url: str = ""
     text: str = ""
     transcript: str = ""
@@ -304,6 +305,7 @@ class BacktestRequest(BaseModel):
 
 class OptimizeRequest(BaseModel):
     strategy_id: str
+    user_id: Optional[str] = None
     n_trials: int = 40
     objective: str = "sharpe"
     param_bounds: Optional[Dict[str, List[float]]] = None
@@ -546,6 +548,7 @@ def create_strategy(payload: CreateRequest) -> Dict[str, Any]:
     row_payload.update({
         "status": "draft",
         "autonomous": bool(settings.AUTONOMOUS_DEFAULT),
+        "user_id": payload.user_id,
         **metrics_patch({}),
     })
     row = store.insert_strategy(row_payload)
@@ -569,6 +572,7 @@ def create_strategy(payload: CreateRequest) -> Dict[str, Any]:
         "objective_name": "sharpe",
         "is_active": True,
         "is_baseline": True,
+        "user_id": payload.user_id,
         "notes": "Initial parameter set captured at creation.",
     })
     store.set_active_optimization(row["id"], optimization["id"])
@@ -656,7 +660,9 @@ def compute_backtest(payload: ComputeBacktestRequest) -> Dict[str, Any]:
         max_daily_dd_pct=settings.MAX_DAILY_DRAWDOWN,
         max_total_dd_pct=settings.MAX_TOTAL_DRAWDOWN,
     )
-    return report.to_dict(include_trades=True)
+    result = report.to_dict(include_trades=True)
+    result["curve"] = _curve(report, payload.split)
+    return result
 
 
 @app.post("/api/strategies/optimize/compute")
@@ -759,6 +765,7 @@ def backtest(payload: BacktestRequest) -> Dict[str, Any]:
         parameters=payload.parameters,
     )
     result = report.to_dict(include_trades=True)
+    result["curve"] = _curve(report, payload.split)
 
     if row is not None and not payload.parameters:
         store.update_strategy(row["id"], metrics_patch(report.metrics))
@@ -797,6 +804,7 @@ def optimize_strategy(payload: OptimizeRequest) -> Dict[str, Any]:
     version = store.next_version(payload.strategy_id)
     optimization = store.insert_optimization({
         "strategy_id": payload.strategy_id,
+        "user_id": payload.user_id or row.get("user_id"),
         "version": version,
         "label": payload.label or f"{result['objective_label']} · v{version}",
         "engine": result["engine"],
@@ -1240,6 +1248,91 @@ def write_settings(payload: SettingsUpdate) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Realtime websocket (companion to the Supabase Realtime channel)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# MetaTrader 5 bridge
+# ---------------------------------------------------------------------------
+class MT5ConnectRequest(BaseModel):
+    """Blank fields fall back to the values saved in the Settings tab."""
+
+    path: Optional[str] = None
+    login: Optional[str] = None
+    password: Optional[str] = None
+    server: Optional[str] = None
+    timeout: int = 60000
+
+
+class ResetRequest(BaseModel):
+    """Wipe the studio. ``scope='user'`` only touches rows owned by user_id."""
+
+    user_id: Optional[str] = None
+    scope: str = "user"
+    reseed: bool = False
+
+
+@app.get("/api/mt5/status")
+def mt5_status() -> Dict[str, Any]:
+    settings = get_settings()
+    status = mt5_executor.bridge.status(settings)
+    status["credentials"] = {
+        "login": bool(settings.MT5_LOGIN),
+        "password": bool(settings.MT5_PASSWORD),
+        "server": bool(settings.MT5_SERVER),
+        "path": bool(settings.MT5_PATH),
+    }
+    return status
+
+
+@app.post("/api/mt5/connect")
+def mt5_connect(payload: MT5ConnectRequest | None = None) -> Dict[str, Any]:
+    """Launch the terminal (if needed) and log in."""
+    settings = get_settings()
+    body = payload or MT5ConnectRequest()
+    outcome = mt5_executor.bridge.connect(
+        path=body.path if body.path is not None else (settings.MT5_PATH or ""),
+        login=body.login if body.login is not None else (settings.MT5_LOGIN or ""),
+        password=body.password if body.password is not None else (settings.MT5_PASSWORD or ""),
+        server=body.server if body.server is not None else (settings.MT5_SERVER or ""),
+        timeout=body.timeout or 60000,
+    )
+    if outcome.get("connected"):
+        outcome["status"] = mt5_executor.bridge.status(settings)
+    return outcome
+
+
+@app.post("/api/mt5/disconnect")
+def mt5_disconnect() -> Dict[str, Any]:
+    return {**mt5_executor.bridge.disconnect(), "status": mt5_executor.bridge.status(get_settings())}
+
+
+@app.get("/api/mt5/price")
+def mt5_price(symbol: str = Query("XAUUSD")) -> Dict[str, Any]:
+    return mt5_executor.bridge.price(symbol)
+
+
+@app.get("/api/mt5/candles")
+def mt5_candles(
+    symbol: str = Query("XAUUSD"),
+    timeframe: str = Query("H1"),
+    count: int = Query(120),
+) -> Dict[str, Any]:
+    return mt5_executor.bridge.candles(symbol, timeframe.upper(), count)
+
+
+@app.get("/api/mt5/symbols")
+def mt5_symbols(needle: str = Query("")) -> Dict[str, Any]:
+    return mt5_executor.bridge.symbols(needle)
+
+
+@app.post("/api/reset")
+def reset_everything(payload: ResetRequest | None = None) -> Dict[str, Any]:
+    """Delete strategies (cascading to optimizations + trade logs)."""
+    body = payload or ResetRequest()
+    removed = store.reset(user_id=body.user_id, scope=body.scope)
+    if body.reseed:
+        _seed_if_empty()
+    return {"removed": removed, "total": len(store.list_strategies()), "store": store.mode}
+
+
 @app.websocket("/ws/trades")
 async def trades_socket(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -1369,6 +1462,7 @@ def _seed_one(seed: Dict[str, Any]) -> None:
         version = store.next_version(row["id"])
         optimization = store.insert_optimization({
             "strategy_id": row["id"],
+            "user_id": row.get("user_id"),
             "version": version,
             "label": f"{outcome['objective_label']} · v{version}",
             "engine": outcome["engine"],
@@ -1434,6 +1528,7 @@ def _log_backtest_trades(row: Dict[str, Any], spec: StrategySpec, report: Any, *
         store.insert_trade_log({
             "strategy_id": row["id"],
             "optimization_id": row.get("active_optimization_id"),
+            "user_id": row.get("user_id"),
             "mode": mode,
             "symbol": spec.symbol,
             "side": trade.side,
@@ -1449,6 +1544,50 @@ def _log_backtest_trades(row: Dict[str, Any], spec: StrategySpec, report: Any, *
             "closed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "meta": {"exit_reason": trade.exit_reason, "sample": trade.sample, "source": "backtest"},
         })
+
+
+def _curve(report: Any, split: float = 0.7, points: int = 260) -> Dict[str, Any]:
+    """Equity / drawdown series shaped for the dashboard charts.
+
+    The raw curve has one point per bar; it is downsampled to ``points`` so a
+    3 000-bar backtest still ships as a few kilobytes of JSON. Trade markers
+    keep their bar indices so the chart can plot entries and exits.
+    """
+    raw = list(getattr(report, "equity_curve", []) or []) or [10_000.0]
+    step = max(1, len(raw) // max(1, points) or 1)
+    equity = raw[::step]
+    if equity[-1] != raw[-1]:
+        equity.append(raw[-1])
+
+    peak = equity[0]
+    drawdown: List[float] = []
+    for value in equity:
+        peak = max(peak, value)
+        drawdown.append(round(((peak - value) / peak) * 100, 4) if peak else 0.0)
+
+    trades = [
+        {
+            "i": int(t.entry_index),
+            "x": int(t.exit_index),
+            "side": t.side,
+            "pnl": round(t.pnl, 2),
+            "r": round(t.r_multiple, 3),
+            "reason": t.exit_reason,
+            "sample": t.sample,
+        }
+        for t in getattr(report, "trades", [])[:400]
+    ]
+    return {
+        "equity": [round(x, 2) for x in equity],
+        "drawdown": drawdown,
+        "initial_equity": round(raw[0], 2),
+        "final_equity": round(raw[-1], 2),
+        "split_index": max(0, min(len(equity) - 1, int(len(equity) * (split or 0.7)))),
+        "max_drawdown_pct": round(max(drawdown) if drawdown else 0.0, 4),
+        "step": step,
+        "bars": getattr(report, "bars_used", 0) or len(raw),
+        "trades": trades,
+    }
 
 
 def _json_dumps(value: Any) -> str:

@@ -5,6 +5,7 @@ import {
   Activity,
   BarChart3,
   Brain,
+  FileText,
   Gauge,
   LineChart,
   Sparkles,
@@ -26,6 +27,7 @@ export default function StrategyCard({
   onBacktest,
   onOptimize,
   onAnalyze,
+  onOpenPaper,
 }: {
   strategy: Strategy;
   versionCount: number;
@@ -33,8 +35,9 @@ export default function StrategyCard({
   onBacktest: () => unknown;
   onOptimize: () => unknown;
   onAnalyze: () => unknown;
+  onOpenPaper?: () => void;
 }) {
-  const { toggleAutonomous, removeStrategy } = useAlphaForge();
+  const { toggleAutonomous, togglePaperTrading, removeStrategy } = useAlphaForge();
   const [busy, setBusy] = useState<string | null>(null);
 
   const run = async (key: string, action: () => unknown) => {
@@ -72,7 +75,7 @@ export default function StrategyCard({
             <Badge tone="violet">v{versionCount} versions</Badge>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex shrink-0 items-center gap-4">
           <div className="text-right">
             <div className="text-[10px] uppercase tracking-wider text-white/35">Autonomous</div>
             <div className="mt-1 flex justify-end">
@@ -80,6 +83,16 @@ export default function StrategyCard({
                 checked={strategy.autonomous}
                 onChange={(value) => void toggleAutonomous(strategy, value)}
                 label={`Autonomous trading for ${strategy.name}`}
+              />
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="text-[10px] uppercase tracking-wider text-white/35">Paper</div>
+            <div className="mt-1 flex justify-end">
+              <Toggle
+                checked={Boolean(strategy.paper_trading)}
+                onChange={(value) => void togglePaperTrading(strategy, value)}
+                label={`Paper trading for ${strategy.name}`}
               />
             </div>
           </div>
@@ -166,6 +179,16 @@ export default function StrategyCard({
           {busy === "analyze" ? <Spinner /> : <Brain size={13} />}
           Analyze
         </button>
+        {onOpenPaper ? (
+          <button
+            className="btn-ghost px-2.5 py-1.5 text-[12px]"
+            onClick={onOpenPaper}
+            title="Open the paper-trading console"
+          >
+            <FileText size={13} />
+            Paper
+          </button>
+        ) : null}
         <button className="btn-ghost ml-auto px-2.5 py-1.5 text-[12px]" onClick={onOpen}>
           Lineage
         </button>

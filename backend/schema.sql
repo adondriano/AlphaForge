@@ -46,6 +46,11 @@ create table if not exists public.strategies (
   status                text        not null default 'draft'
                         check (status in ('draft','backtested','optimized','shadow','paper','live','halted')),
   autonomous            boolean     not null default false,
+  -- paper trading runs the strategy against the shield without sending orders
+  paper_trading         boolean     not null default false,
+  -- owning account (Supabase Auth). NULL rows are legacy / unowned and are
+  -- readable by everybody but editable by nobody.
+  user_id               uuid        references auth.users(id) on delete cascade,
   -- aggregate metrics (kept denormalised so the dashboard is a single read)
   win_rate              numeric(7,4)  not null default 0,
   total_trades          integer       not null default 0,
@@ -82,6 +87,7 @@ create table if not exists public.optimizations (
   is_active      boolean     not null default false,
   is_baseline    boolean     not null default false,
   notes          text        not null default '',
+  user_id        uuid        references auth.users(id) on delete cascade,
   created_at     timestamptz not null default now(),
   constraint optimizations_strategy_version_key unique (strategy_id, version)
 );
@@ -127,6 +133,7 @@ create table if not exists public.trade_logs (
   blocked_reason   text,
   opened_at        timestamptz not null default now(),
   closed_at        timestamptz,
+  user_id          uuid        references auth.users(id) on delete cascade,
   meta             jsonb       not null default '{}'::jsonb
 );
 
@@ -160,10 +167,29 @@ create trigger app_settings_set_updated_at
   for each row execute function public.set_updated_at();
 
 -- -----------------------------------------------------------------------------
+-- Forward migration for databases created before multi-user support.
+-- (The create table statements above already carry these columns; these ALTERs
+--  bring an existing database up to date and are no-ops otherwise.)
+-- -----------------------------------------------------------------------------
+alter table public.strategies    add column if not exists user_id       uuid references auth.users(id) on delete cascade;
+alter table public.strategies    add column if not exists paper_trading boolean not null default false;
+alter table public.optimizations add column if not exists user_id       uuid references auth.users(id) on delete cascade;
+alter table public.trade_logs    add column if not exists user_id       uuid references auth.users(id) on delete cascade;
+
+create index if not exists strategies_user_idx    on public.strategies (user_id);
+create index if not exists optimizations_user_idx on public.optimizations (user_id);
+create index if not exists trade_logs_user_idx    on public.trade_logs (user_id);
+
+-- -----------------------------------------------------------------------------
 -- Row Level Security
---  AlphaForge ships as a single-tenant studio: the anon/authenticated roles get
---  full CRUD and the service_role bypasses RLS entirely. Tighten these policies
---  (e.g. `auth.uid() = owner_id`) before exposing the project to other users.
+--
+-- Sharing model:
+--   * anyone (anonymous visitors included) may READ every strategy, parameter
+--     version and trade — AlphaForge is meant to be shared as a public studio;
+--   * only the signed-in owner may INSERT / UPDATE / DELETE their rows;
+--   * app_settings is server-only. It holds the Supabase service-role key and
+--     the MT5 password, so no anon/authenticated policy exists at all — the
+--     default is deny and only service_role (which bypasses RLS) can touch it.
 -- -----------------------------------------------------------------------------
 alter table public.strategies    enable row level security;
 alter table public.optimizations enable row level security;
@@ -174,13 +200,35 @@ do $$
 declare
   t text;
 begin
-  foreach t in array array['strategies','optimizations','trade_logs','app_settings'] loop
+  foreach t in array array['strategies','optimizations','trade_logs'] loop
+    -- retire the old single-tenant policy
     execute format('drop policy if exists alphaforge_full_access_%1$s on public.%1$I', t);
+
+    execute format('drop policy if exists alphaforge_public_read_%1$s on public.%1$I', t);
     execute format(
-      'create policy alphaforge_full_access_%1$s on public.%1$I '
-      'for all to anon, authenticated using (true) with check (true)', t);
+      'create policy alphaforge_public_read_%1$s on public.%1$I '
+      'for select to anon, authenticated using (true)', t);
+
+    execute format('drop policy if exists alphaforge_owner_insert_%1$s on public.%1$I', t);
+    execute format(
+      'create policy alphaforge_owner_insert_%1$s on public.%1$I '
+      'for insert to authenticated with check (auth.uid() = user_id)', t);
+
+    execute format('drop policy if exists alphaforge_owner_update_%1$s on public.%1$I', t);
+    execute format(
+      'create policy alphaforge_owner_update_%1$s on public.%1$I '
+      'for update to authenticated using (auth.uid() = user_id) '
+      'with check (auth.uid() = user_id)', t);
+
+    execute format('drop policy if exists alphaforge_owner_delete_%1$s on public.%1$I', t);
+    execute format(
+      'create policy alphaforge_owner_delete_%1$s on public.%1$I '
+      'for delete to authenticated using (auth.uid() = user_id)', t);
   end loop;
 end $$;
+
+-- app_settings holds secrets: no anon/authenticated policy => deny by default.
+drop policy if exists alphaforge_full_access_app_settings on public.app_settings;
 
 -- -----------------------------------------------------------------------------
 -- Realtime publication — powers the live dashboard + trade ticker

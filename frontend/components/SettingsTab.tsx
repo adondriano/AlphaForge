@@ -1,17 +1,22 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
+  AlertTriangle,
   Bot,
   Check,
   Cpu,
   Database,
   Eye,
   EyeOff,
+  Plug,
+  PlugZap,
+  RefreshCw,
   Save,
   Server,
   ShieldCheck,
   Terminal,
+  Trash2,
 } from "lucide-react";
 
 import { useAlphaForge } from "./AlphaForgeProvider";
@@ -71,6 +76,13 @@ const GROUPS: {
       { key: "MT5_PATH", label: "MT5_PATH", placeholder: "C:\\Program Files\\MetaTrader 5\\terminal.exe" },
       { key: "MT5_LOGIN", label: "MT5_LOGIN", placeholder: "12345678" },
       { key: "MT5_SERVER", label: "MT5_SERVER", placeholder: "Broker-Demo" },
+      {
+        key: "MT5_PASSWORD",
+        label: "MT5_PASSWORD",
+        type: "password",
+        placeholder: "••••••••",
+        hint: "Kept in this browser and forwarded to the Python engine only — never to the LLM provider.",
+      },
     ],
   },
   {
@@ -112,12 +124,34 @@ const GROUPS: {
 ];
 
 export default function SettingsTab() {
-  const { settings, updateSettings, engineStatus, storeMode, notify } = useAlphaForge();
+  const {
+    settings,
+    updateSettings,
+    engineStatus,
+    storeMode,
+    notify,
+    canEdit,
+    requireAccount,
+    mt5Status,
+    mt5Busy,
+    refreshMt5,
+    connectMt5,
+    disconnectMt5,
+    resetEverything,
+  } = useAlphaForge();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [revealed, setRevealed] = useState<Record<string, boolean>>({});
+  const [reseed, setReseed] = useState(true);
+  const [resetting, setResetting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings);
+
+  // Keep the form in sync when settings change from elsewhere (reset, first load).
+  useEffect(() => {
+    setDraft((current) => (JSON.stringify(current) === JSON.stringify(settings) ? current : settings));
+  }, [settings]);
 
   const set = (key: FieldKey, value: string | number | boolean) => {
     setDraft((current) => ({ ...current, [key]: value } as AppSettings));
@@ -132,6 +166,9 @@ export default function SettingsTab() {
       setSaving(false);
     }
   };
+
+  const mt5Connected = Boolean(mt5Status?.connected);
+  const mt5Tone: "mint" | "amber" | "neutral" = mt5Connected ? "mint" : "amber";
 
   return (
     <div className="space-y-4">
@@ -239,6 +276,148 @@ export default function SettingsTab() {
         </div>
       ))}
 
+      <div className={cx("panel p-5", mt5Connected ? "border-forge-mint/25" : "border-forge-amber/25")}>
+        <div className="mb-1 flex items-center gap-2">
+          {mt5Connected ? (
+            <PlugZap size={15} className="text-forge-mint" />
+          ) : (
+            <Plug size={15} className="text-forge-amber" />
+          )}
+          <h3 className="text-sm font-semibold text-white">MetaTrader 5 bridge</h3>
+          <Badge tone={mt5Tone}>{mt5Connected ? "connected" : "disconnected"}</Badge>
+          <Badge tone="neutral">{mt5Status?.mode ?? "shadow"}</Badge>
+        </div>
+        <p className="mb-4 text-[12px] leading-relaxed text-white/40">
+          {mt5Connected
+            ? "Live quotes and order routing are active through the Python engine."
+            : "Fill in MT5_PATH, MT5_LOGIN, MT5_SERVER and MT5_PASSWORD, run the Python engine on the Windows machine that hosts your terminal, then connect. Until then every fill is simulated locally so the studio stays fully usable."}
+          {mt5Status?.reason ? (
+            <>
+              {" "}
+              <span className="text-white/55">Engine says: {mt5Status.reason}</span>
+            </>
+          ) : null}
+        </p>
+        {mt5Connected && mt5Status?.account ? (
+          <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <AccountCell label="Account" value={String(mt5Status.account.login ?? "—")} />
+            <AccountCell label="Server" value={mt5Status.account.server ?? "—"} />
+            <AccountCell
+              label="Balance"
+              value={
+                mt5Status.account.balance != null
+                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.balance.toFixed(2)}`
+                  : "—"
+              }
+            />
+            <AccountCell
+              label="Equity"
+              value={
+                mt5Status.account.equity != null
+                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.equity.toFixed(2)}`
+                  : "—"
+              }
+            />
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
+          {mt5Connected ? (
+            <button
+              className="btn-ghost text-[12px]"
+              disabled={mt5Busy || !canEdit}
+              onClick={() => void disconnectMt5()}
+            >
+              {mt5Busy ? <Spinner /> : <Plug size={14} />} Disconnect
+            </button>
+          ) : (
+            <button
+              className="btn-primary text-[12px]"
+              disabled={mt5Busy || !canEdit}
+              onClick={async () => {
+                await updateSettings(draft);
+                await connectMt5();
+              }}
+            >
+              {mt5Busy ? <Spinner /> : <PlugZap size={14} />} Save &amp; connect
+            </button>
+          )}
+          <button
+            className="btn-ghost text-[12px]"
+            disabled={mt5Busy}
+            onClick={() => void refreshMt5()}
+          >
+            {mt5Busy ? <Spinner /> : <RefreshCw size={14} />} Refresh status
+          </button>
+          {!canEdit ? (
+            <span className="text-[11px] text-white/35">
+              Sign in to open or close the terminal bridge.
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="panel border-forge-rose/25 p-5">
+        <div className="mb-1 flex items-center gap-2">
+          <AlertTriangle size={15} className="text-forge-rose" />
+          <h3 className="text-sm font-semibold text-white">Reset everything</h3>
+        </div>
+        <p className="text-[12px] leading-relaxed text-white/40">
+          Deletes every strategy, parameter version, trade log and paper-trading session and clears
+          the engine cache. Your saved settings are kept.
+        </p>
+        <label className="mt-3 flex items-center gap-2 text-[12px] text-white/60">
+          <input
+            type="checkbox"
+            className="h-3.5 w-3.5 accent-forge-cyan"
+            checked={reseed}
+            onChange={(event) => setReseed(event.target.checked)}
+          />
+          Re-seed three demo strategies afterwards
+        </label>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {confirming ? (
+            <>
+              <button
+                className="btn-danger text-[12px]"
+                disabled={resetting || !canEdit}
+                onClick={async () => {
+                  setResetting(true);
+                  try {
+                    await resetEverything({ reseed });
+                  } finally {
+                    setResetting(false);
+                    setConfirming(false);
+                  }
+                }}
+              >
+                {resetting ? <Spinner /> : <Trash2 size={14} />} Yes, wipe it all
+              </button>
+              <button
+                className="btn-ghost text-[12px]"
+                disabled={resetting}
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </button>
+            </>
+          ) : (
+            <button
+              className="btn-ghost text-[12px]"
+              disabled={!canEdit}
+              onClick={() => {
+                if (!requireAccount("Resetting the studio")) return;
+                setConfirming(true);
+              }}
+            >
+              <Trash2 size={14} /> Reset everything…
+            </button>
+          )}
+          {!canEdit ? (
+            <span className="text-[11px] text-white/35">Sign in to reset your workspace.</span>
+          ) : null}
+        </div>
+      </div>
+
       <div className="panel p-5">
         <div className="mb-1 flex items-center gap-2">
           <Server size={15} className="text-white/60" />
@@ -262,11 +441,20 @@ export default function SettingsTab() {
             Discard changes
           </button>
         ) : null}
-        <button className="btn-primary" onClick={save} disabled={saving || !dirty}>
+        <button className="btn-primary" onClick={save} disabled={saving || !dirty || !canEdit}>
           {saving ? <Spinner /> : <Save size={15} />}
           {dirty ? "Save settings" : "Saved"}
         </button>
       </div>
+    </div>
+  );
+}
+
+function AccountCell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-white/35">{label}</div>
+      <div className="tabular truncate text-[13px] font-semibold text-white/85">{value}</div>
     </div>
   );
 }

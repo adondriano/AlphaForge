@@ -14,6 +14,9 @@ import type {
   AnalysisReport,
   AppSettings,
   BacktestResult,
+  Mt5CandleSeries,
+  Mt5Quote,
+  Mt5Status,
   Metrics,
   OptimizeResult,
   Strategy,
@@ -398,5 +401,133 @@ export async function fetchSettings(): Promise<Partial<AppSettings> | null> {
     );
   } catch {
     return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* MetaTrader 5 bridge                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Returned whenever the engine cannot be reached. The UI renders an explicit
+ * "connect MT5" state from this — it must never invent a price.
+ */
+export const MT5_UNAVAILABLE: Mt5Status = {
+  available: false,
+  connected: false,
+  mode: "unavailable",
+  configured: false,
+  reason:
+    API_URL
+      ? "The Python engine is unreachable. Start it locally (`uvicorn main:app --port 8000`) on the machine that has MetaTrader 5 installed."
+      : "NEXT_PUBLIC_API_URL is not set. Live quotes require the local Python engine running beside MetaTrader 5 — MetaTrader 5 cannot be reached from a hosted deployment.",
+};
+
+export interface Mt5Credentials {
+  path?: string;
+  login?: string;
+  password?: string;
+  server?: string;
+  timeout?: number;
+}
+
+export async function mt5Status(): Promise<Mt5Status> {
+  if (!API_URL) return MT5_UNAVAILABLE;
+  try {
+    return await get<Mt5Status>("/api/mt5/status", 8000);
+  } catch {
+    return MT5_UNAVAILABLE;
+  }
+}
+
+/** Launch the terminal (if needed) and log in. Blank fields use saved settings. */
+export async function mt5Connect(
+  credentials: Mt5Credentials = {},
+): Promise<Mt5Status & { reason?: string }> {
+  if (!API_URL) return MT5_UNAVAILABLE;
+  const outcome = await request<{ connected: boolean; reason?: string; status?: Mt5Status }>(
+    "/api/mt5/connect",
+    credentials,
+    90000,
+  );
+  return outcome.status ?? { ...(outcome as Mt5Status) };
+}
+
+export async function mt5Disconnect(): Promise<Mt5Status> {
+  if (!API_URL) return MT5_UNAVAILABLE;
+  try {
+    const outcome = await request<{ status?: Mt5Status }>("/api/mt5/disconnect", {}, 15000);
+    return outcome.status ?? MT5_UNAVAILABLE;
+  } catch {
+    return MT5_UNAVAILABLE;
+  }
+}
+
+export async function mt5Price(symbol: string): Promise<Mt5Quote> {
+  if (!API_URL) {
+    return { available: false, symbol, reason: MT5_UNAVAILABLE.reason };
+  }
+  try {
+    return await get<Mt5Quote>(`/api/mt5/price?symbol=${encodeURIComponent(symbol)}`, 8000);
+  } catch {
+    return { available: false, symbol, reason: MT5_UNAVAILABLE.reason };
+  }
+}
+
+export async function mt5Candles(
+  symbol: string,
+  timeframe = "H1",
+  count = 120,
+): Promise<Mt5CandleSeries> {
+  if (!API_URL) {
+    return {
+      available: false,
+      symbol,
+      timeframe,
+      candles: [],
+      reason: MT5_UNAVAILABLE.reason,
+    };
+  }
+  try {
+    return await get<Mt5CandleSeries>(
+      `/api/mt5/candles?symbol=${encodeURIComponent(symbol)}` +
+        `&timeframe=${encodeURIComponent(timeframe)}&count=${count}`,
+      10000,
+    );
+  } catch {
+    return {
+      available: false,
+      symbol,
+      timeframe,
+      candles: [],
+      reason: MT5_UNAVAILABLE.reason,
+    };
+  }
+}
+
+export async function mt5Symbols(needle = ""): Promise<string[]> {
+  if (!API_URL) return [];
+  try {
+    const outcome = await get<{ available: boolean; symbols: string[] }>(
+      `/api/mt5/symbols?needle=${encodeURIComponent(needle)}`,
+      8000,
+    );
+    return outcome.symbols ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* reset                                                                       */
+/* -------------------------------------------------------------------------- */
+
+export async function resetEngine(user_id?: string | null): Promise<boolean> {
+  if (!API_URL) return false;
+  try {
+    await request<{ removed: number }>("/api/reset", { user_id, scope: "user" }, 30000);
+    return true;
+  } catch {
+    return false;
   }
 }

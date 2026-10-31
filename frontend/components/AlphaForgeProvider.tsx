@@ -12,17 +12,21 @@ import {
 import type { ReactNode } from "react";
 
 import * as api from "@/lib/api";
-import { dataStore, newId } from "@/lib/data";
+import { useAuth } from "@/lib/auth";
+import { dataStore, newId, setCurrentUserId } from "@/lib/data";
 import { evaluateShield } from "@/lib/engine";
 import { getSupabaseClient, isSupabaseConfigured, resetSupabaseClient } from "@/lib/supabaseClient";
 import { loadSettings, saveSettings } from "@/lib/settings";
 import type {
   AnalysisReport,
   AppSettings,
+  BacktestCurve,
   BacktestResult,
   Metrics,
+  Mt5Status,
   Optimization,
   OptimizeResult,
+  PaperStats,
   Strategy,
   TradeLog,
 } from "@/lib/types";
@@ -63,6 +67,17 @@ interface AlphaForgeContextValue {
   storeMode: "supabase" | "local";
   toasts: Toast[];
 
+  mt5Status: Mt5Status | null;
+  mt5Busy: boolean;
+  paperStats: Record<string, PaperStats>;
+  paperBusy: Record<string, boolean>;
+  /** Equity series from the most recent backtest of each strategy. */
+  lastCurves: Record<string, BacktestCurve>;
+
+  /** Signed in and therefore allowed to mutate data. */
+  canEdit: boolean;
+  requireAccount: (action: string) => boolean;
+
   notify: (toast: Omit<Toast, "id">) => void;
   dismissToast: (id: string) => void;
 
@@ -81,11 +96,19 @@ interface AlphaForgeContextValue {
   runAnalyze: (strategy: Strategy, noLlm: boolean) => Promise<AnalysisReport | null>;
   rollback: (strategy: Strategy, optimization: Optimization) => Promise<void>;
   toggleAutonomous: (strategy: Strategy, enabled: boolean) => Promise<void>;
+  togglePaperTrading: (strategy: Strategy, enabled: boolean) => Promise<void>;
+  resetPaperSession: (strategy: Strategy) => Promise<void>;
   setStatus: (strategy: Strategy, status: Strategy["status"]) => Promise<void>;
   removeStrategy: (strategy: Strategy) => Promise<void>;
   runPaperSession: (strategy: Strategy, nTrades?: number) => Promise<PaperResult | null>;
   resetAccount: (equity?: number) => void;
   clearTrades: () => Promise<void>;
+
+  refreshMt5: () => Promise<Mt5Status>;
+  connectMt5: (credentials?: api.Mt5Credentials) => Promise<boolean>;
+  disconnectMt5: () => Promise<void>;
+
+  resetEverything: (options?: { reseed?: boolean }) => Promise<void>;
 }
 
 const AlphaForgeContext = createContext<AlphaForgeContextValue | null>(null);
@@ -113,7 +136,36 @@ const round = (value: number, digits = 4) => {
   return Math.round(value * factor) / factor;
 };
 
+/** How often each armed paper session takes its next signal. */
+const PAPER_TICK_MS = 5000;
+const PAPER_START_EQUITY = 10_000;
+
+const emptyPaperStats = (strategy: Strategy, running = false): PaperStats => ({
+  strategy_id: strategy.id,
+  running,
+  trades: 0,
+  wins: 0,
+  losses: 0,
+  blocked: 0,
+  open: 0,
+  net_pnl: 0,
+  net_pnl_pct: 0,
+  equity: PAPER_START_EQUITY,
+  peak_equity: PAPER_START_EQUITY,
+  day_pnl_pct: 0,
+  total_pnl_pct: 0,
+  daily_drawdown_pct: 0,
+  total_drawdown_pct: 0,
+  expectancy_r: 0,
+  last_signal: null,
+  last_update: null,
+  parameters: strategy.parameters ?? {},
+  recent: [],
+});
+
 export function AlphaForgeProvider({ children }: { children: ReactNode }) {
+  const { user, isGuest, ready: authReady } = useAuth();
+
   const [ready, setReady] = useState(false);
   const [strategies, setStrategies] = useState<Strategy[]>([]);
   const [optimizations, setOptimizations] = useState<Record<string, Optimization[]>>({});
@@ -130,10 +182,32 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   const [storeMode, setStoreMode] = useState<"supabase" | "local">("local");
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  const [mt5Status, setMt5Status] = useState<Mt5Status | null>(null);
+  const [mt5Busy, setMt5Busy] = useState(false);
+  const [paperBusy, setPaperBusy] = useState<Record<string, boolean>>({});
+  const [paperStats, setPaperStats] = useState<Record<string, PaperStats>>({});
+  const [lastCurves, setLastCurves] = useState<Record<string, BacktestCurve>>({});
+
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const demoAttempted = useRef(false);
+  const accountRef = useRef(account);
+  accountRef.current = account;
+  const strategiesRef = useRef<Strategy[]>(strategies);
+  strategiesRef.current = strategies;
+  const optimizationsRef = useRef(optimizations);
+  optimizationsRef.current = optimizations;
 
+  const demoAttempted = useRef(false);
+  const seededUsers = useRef<Set<string>>(new Set());
+  const paperQueues = useRef<Record<string, { trades: BacktestResult["trades"]; index: number }>>(
+    {},
+  );
+  const paperStatsRef = useRef<Record<string, PaperStats>>({});
+  const paperRunning = useRef(false);
+
+  /* ------------------------------------------------------------------ */
+  /* toasts                                                              */
+  /* ------------------------------------------------------------------ */
   const notify = useCallback((toast: Omit<Toast, "id">) => {
     const id = newId();
     setToasts((current) => [...current, { ...toast, id }]);
@@ -145,6 +219,24 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   const dismissToast = useCallback((id: string) => {
     setToasts((current) => current.filter((item) => item.id !== id));
   }, []);
+
+  /* ------------------------------------------------------------------ */
+  /* account gate — guests may read, only owners may write               */
+  /* ------------------------------------------------------------------ */
+  const canEdit = !isGuest;
+
+  const requireAccount = useCallback(
+    (action: string) => {
+      if (canEdit) return true;
+      notify({
+        kind: "info",
+        title: "Sign in to continue",
+        detail: `${action} requires an account — visitors have read-only access.`,
+      });
+      return false;
+    },
+    [canEdit, notify],
+  );
 
   /* ------------------------------------------------------------------ */
   /* boot                                                                */
@@ -168,6 +260,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
     setStoreMode(dataStore.mode);
   }, []);
 
+  // Keep the persistence layer aware of who is signed in so every insert is
+  // stamped with the owner id (row-level security enforces it server-side).
+  useEffect(() => {
+    setCurrentUserId(user?.id ?? null);
+  }, [user]);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -177,12 +275,26 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       await refresh();
       const status = await api.refreshEngineStatus();
       if (!cancelled) setEngineStatus(status);
+      const mt5 = await api.mt5Status();
+      if (!cancelled) setMt5Status(mt5);
       if (!cancelled) setReady(true);
     })();
     return () => {
       cancelled = true;
     };
   }, [refresh]);
+
+  // Switching accounts re-scopes everything: clear local mirrors and reload.
+  useEffect(() => {
+    if (!authReady) return;
+    setOptimizations({});
+    setTradeLogs([]);
+    setPaperStats({});
+    paperStatsRef.current = {};
+    paperQueues.current = {};
+    demoAttempted.current = false;
+    void refresh();
+  }, [authReady, user?.id, refresh]);
 
   // Realtime: mirror remote changes into local state.
   useEffect(() => {
@@ -224,10 +336,66 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   /* ------------------------------------------------------------------ */
+  /* MetaTrader 5                                                        */
+  /* ------------------------------------------------------------------ */
+  const refreshMt5 = useCallback(async () => {
+    const status = await api.mt5Status();
+    setMt5Status(status);
+    return status;
+  }, []);
+
+  const connectMt5 = useCallback(
+    async (credentials?: api.Mt5Credentials) => {
+      setMt5Busy(true);
+      try {
+        const status = await api.mt5Connect(credentials ?? {});
+        setMt5Status(status);
+        if (status.connected) {
+          notify({
+            kind: "success",
+            title: "MetaTrader 5 connected",
+            detail: status.account?.server
+              ? `Account ${status.account.login ?? "—"} on ${status.account.server}`
+              : "Live quotes and execution are now available.",
+          });
+        } else {
+          notify({
+            kind: "error",
+            title: "Could not connect to MetaTrader 5",
+            detail: status.reason ?? "Unknown error from the terminal bridge.",
+          });
+        }
+        return Boolean(status.connected);
+      } catch (error) {
+        notify({
+          kind: "error",
+          title: "Could not reach the engine",
+          detail: error instanceof Error ? error.message : String(error),
+        });
+        return false;
+      } finally {
+        setMt5Busy(false);
+      }
+    },
+    [notify],
+  );
+
+  const disconnectMt5 = useCallback(async () => {
+    setMt5Busy(true);
+    try {
+      setMt5Status(await api.mt5Disconnect());
+      notify({ kind: "info", title: "MetaTrader 5 disconnected" });
+    } finally {
+      setMt5Busy(false);
+    }
+  }, [notify]);
+
+  /* ------------------------------------------------------------------ */
   /* settings                                                            */
   /* ------------------------------------------------------------------ */
   const updateSettings = useCallback(
     async (patch: Partial<AppSettings>) => {
+      if (!requireAccount("Changing settings")) return;
       const next = saveSettings({ ...settingsRef.current, ...patch });
       setSettings(next);
       const supabaseChanged =
@@ -242,8 +410,10 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       }
       await api.pushSettings(next);
       setEngineStatus(await api.refreshEngineStatus());
+      // Credentials may have changed — the bridge status depends on them.
+      setMt5Status(await api.mt5Status());
     },
-    [refresh],
+    [refresh, requireAccount],
   );
 
   /* ------------------------------------------------------------------ */
@@ -251,6 +421,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   /* ------------------------------------------------------------------ */
   const createStrategy = useCallback(
     async (input: { spec: TranspileResult; engine: string }) => {
+      if (!requireAccount("Creating a strategy")) return null;
       const { spec } = input;
       const currentSettings = settingsRef.current;
       const bars = Math.min(currentSettings.BACKTEST_BARS || 3000, 2400);
@@ -273,6 +444,8 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         },
         status: "draft",
         autonomous: currentSettings.AUTONOMOUS_DEFAULT,
+        paper_trading: false,
+        user_id: user?.id ?? null,
         win_rate: 0,
         total_trades: 0,
         net_return_pct: 0,
@@ -286,6 +459,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       };
 
       let metrics: Metrics | null = null;
+      let curve: BacktestCurve | null = null;
       try {
         const report = await api.backtest(draft, {
           bars,
@@ -294,6 +468,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
           maxTotalDdPct: currentSettings.MAX_TOTAL_DRAWDOWN,
         });
         metrics = report.metrics;
+        curve = report.curve ?? null;
       } catch {
         metrics = null;
       }
@@ -311,10 +486,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         risk_profile: draft.risk_profile,
         status: metrics ? "backtested" : "draft",
         autonomous: draft.autonomous,
+        paper_trading: false,
         ...(metrics ? metricPatch(metrics) : {}),
       };
 
       const created = await dataStore.insertStrategy(row);
+      if (curve) setLastCurves((current) => ({ ...current, [created.id]: curve! }));
       const baseline = await dataStore.insertOptimization({
         strategy_id: created.id,
         version: 1,
@@ -342,12 +519,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       });
       return created;
     },
-    [notify, refresh],
+    [notify, refresh, requireAccount, user],
   );
 
   const runBacktest = useCallback(
     async (strategyId: string, options: api.BacktestOptions = {}) => {
-      const strategy = strategies.find((item) => item.id === strategyId);
+      const strategy = strategiesRef.current.find((item) => item.id === strategyId);
       if (!strategy) return null;
       const currentSettings = settingsRef.current;
       const report = await api.backtest(strategy, {
@@ -357,18 +534,25 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         maxTotalDdPct: currentSettings.MAX_TOTAL_DRAWDOWN,
         ...options,
       });
-      await dataStore.updateStrategy(strategyId, {
-        ...metricPatch(report.metrics),
-        status: strategy.status === "draft" ? "backtested" : strategy.status,
-      });
-      await refresh();
+      if (report.curve) {
+        setLastCurves((current) => ({ ...current, [strategyId]: report.curve! }));
+      }
+      // Persisting metrics requires ownership; the chart still renders for guests.
+      if (requireAccount("Saving backtest results")) {
+        await dataStore.updateStrategy(strategyId, {
+          ...metricPatch(report.metrics),
+          status: strategy.status === "draft" ? "backtested" : strategy.status,
+        });
+        await refresh();
+      }
       return report;
     },
-    [optimizations, refresh, strategies],
+    [refresh, requireAccount],
   );
 
   const runOptimize = useCallback(
     async (strategy: Strategy, options: api.OptimizeOptions) => {
+      if (!requireAccount("Running an optimization")) return null;
       const currentSettings = settingsRef.current;
       const result = await api.optimizeStrategy(strategy, {
         nTrials: options.nTrials ?? currentSettings.OPTIMIZER_TRIALS,
@@ -378,7 +562,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         maxTotalDdPct: currentSettings.MAX_TOTAL_DRAWDOWN,
         ...options,
       });
-      const existing = optimizations[strategy.id] ?? [];
+      const existing = optimizationsRef.current[strategy.id] ?? [];
       const version = existing.reduce((max, item) => Math.max(max, item.version), 0) + 1;
       const optimization = await dataStore.insertOptimization({
         strategy_id: strategy.id,
@@ -410,14 +594,14 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       });
       return { optimization, result };
     },
-    [notify, optimizations, refresh],
+    [notify, refresh, requireAccount],
   );
 
   const runAnalyze = useCallback(
     async (strategy: Strategy, noLlm: boolean) => {
       const currentSettings = settingsRef.current;
-      const baseline = (optimizations[strategy.id] ?? []).find((item) => item.is_baseline);
-      const active = (optimizations[strategy.id] ?? []).find((item) => item.is_active);
+      const baseline = (optimizationsRef.current[strategy.id] ?? []).find((item) => item.is_baseline);
+      const active = (optimizationsRef.current[strategy.id] ?? []).find((item) => item.is_active);
       return api.analyze(strategy, {
         bars: currentSettings.BACKTEST_BARS,
         noLlm,
@@ -427,11 +611,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         maxTotalDdPct: currentSettings.MAX_TOTAL_DRAWDOWN,
       });
     },
-    [optimizations],
+    [],
   );
 
   const rollback = useCallback(
     async (strategy: Strategy, optimization: Optimization) => {
+      if (!requireAccount("Rolling back")) return;
       await dataStore.setActiveOptimization(strategy.id, optimization.id);
       await dataStore.updateStrategy(strategy.id, {
         parameters: { ...strategy.parameters, ...optimization.parameters },
@@ -445,11 +630,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         detail: `${strategy.name} is now running the parameters from ${optimization.label}.`,
       });
     },
-    [notify, refresh],
+    [notify, refresh, requireAccount],
   );
 
   const toggleAutonomous = useCallback(
     async (strategy: Strategy, enabled: boolean) => {
+      if (!requireAccount("Arming autonomous execution")) return;
       await dataStore.updateStrategy(strategy.id, {
         autonomous: enabled,
         status: enabled ? "paper" : strategy.status,
@@ -463,24 +649,211 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
           : "Signals are logged but not routed to execution.",
       });
     },
-    [notify, refresh],
+    [notify, refresh, requireAccount],
   );
 
   const setStrategyStatus = useCallback(
     async (strategy: Strategy, status: Strategy["status"]) => {
+      if (!requireAccount("Changing strategy status")) return;
       await dataStore.updateStrategy(strategy.id, { status });
       await refresh();
     },
-    [refresh],
+    [refresh, requireAccount],
   );
 
   const removeStrategy = useCallback(
     async (strategy: Strategy) => {
+      if (!requireAccount("Deleting a strategy")) return;
       await dataStore.deleteStrategy(strategy.id);
+      setPaperStats((current) => {
+        const next = { ...current };
+        delete next[strategy.id];
+        return next;
+      });
+      delete paperStatsRef.current[strategy.id];
+      delete paperQueues.current[strategy.id];
       await refresh();
       notify({ kind: "info", title: `${strategy.name} deleted` });
     },
-    [notify, refresh],
+    [notify, refresh, requireAccount],
+  );
+
+  /* ------------------------------------------------------------------ */
+  /* paper trading                                                       */
+  /* ------------------------------------------------------------------ */
+  const commitStats = useCallback(
+    (strategyId: string, next: PaperStats, log?: TradeLog) => {
+      paperStatsRef.current[strategyId] = next;
+      setPaperStats((current) => ({ ...current, [strategyId]: next }));
+      if (log) setTradeLogs((current) => [log, ...current.filter((i) => i.id !== log.id)].slice(0, 200));
+    },
+    [],
+  );
+
+  const paperTick = useCallback(async () => {
+    if (paperRunning.current) return;
+    paperRunning.current = true;
+    try {
+      const armed = strategiesRef.current.filter((item) => item.paper_trading);
+      for (const strategy of armed) {
+        const currentSettings = settingsRef.current;
+        const shieldConfig = {
+          maxDailyDrawdownPct: currentSettings.MAX_DAILY_DRAWDOWN,
+          maxTotalDrawdownPct: currentSettings.MAX_TOTAL_DRAWDOWN,
+          riskPerTradePct:
+            strategy.risk_profile?.risk_per_trade_pct ?? currentSettings.RISK_PER_TRADE_PCT,
+          maxConcurrentTrades: currentSettings.MAX_CONCURRENT_TRADES,
+        };
+
+        // Replay buffer: one backtest gives a deterministic signal queue that
+        // the session walks through, so a tick is one trade rather than a
+        // full re-simulation every few seconds.
+        let queue = paperQueues.current[strategy.id];
+        if (!queue || queue.index >= queue.trades.length) {
+          const report = await api.backtest(strategy, {
+            bars: 900,
+            seed: Date.now() % 100000,
+            split: 0.5,
+            maxDailyDdPct: currentSettings.MAX_DAILY_DRAWDOWN,
+            maxTotalDdPct: currentSettings.MAX_TOTAL_DRAWDOWN,
+          });
+          queue = { trades: report.trades ?? [], index: 0 };
+          paperQueues.current[strategy.id] = queue;
+        }
+        const trade = queue.trades[queue.index];
+        if (!trade) continue;
+        queue.index += 1;
+
+        const stats = paperStatsRef.current[strategy.id] ?? emptyPaperStats(strategy, true);
+        const dayStart = accountRef.current.day_start_equity;
+        const decision = evaluateShield(shieldConfig, {
+          equity: stats.equity,
+          dayStartEquity: dayStart,
+          peakEquity: stats.peak_equity,
+          requestedRiskPct: shieldConfig.riskPerTradePct,
+          volume: 0.01,
+          openPositions: 0,
+        });
+
+        const allowed = decision.allowed;
+        const pnl = allowed ? trade.pnl : 0;
+        const equity = stats.equity + pnl;
+        const peak = Math.max(stats.peak_equity, equity);
+
+        const log = await dataStore.insertTradeLog({
+          strategy_id: strategy.id,
+          optimization_id: strategy.active_optimization_id,
+          mode: "paper",
+          symbol: strategy.symbol,
+          side: trade.side,
+          entry_price: trade.entry,
+          exit_price: trade.exit,
+          stop_loss: trade.stop_loss,
+          take_profit: trade.take_profit,
+          volume: 0.01,
+          pnl: round(pnl, 4),
+          pnl_pct: allowed ? round(trade.pnl_pct, 4) : 0,
+          r_multiple: allowed ? round(trade.r_multiple, 4) : 0,
+          status: allowed ? "closed" : "blocked",
+          blocked_reason: allowed ? null : decision.reason,
+          closed_at: new Date().toISOString(),
+          day_pnl_pct: round(((equity - dayStart) / (dayStart || 1)) * 100, 4),
+          total_pnl_pct: round(
+            ((equity - accountRef.current.starting_equity) /
+              (accountRef.current.starting_equity || 1)) *
+              100,
+            4,
+          ),
+          equity_after: round(equity, 4),
+          meta: { exit_reason: trade.exit_reason, decision, source: "paper-loop" },
+        });
+
+        const trades = stats.trades + 1;
+        const wins = stats.wins + (allowed && pnl > 0 ? 1 : 0);
+        const losses = stats.losses + (allowed && pnl <= 0 ? 1 : 0);
+        commitStats(
+          strategy.id,
+          {
+            ...stats,
+            running: true,
+            trades,
+            wins,
+            losses,
+            blocked: stats.blocked + (allowed ? 0 : 1),
+            net_pnl: stats.net_pnl + pnl,
+            net_pnl_pct: ((stats.net_pnl + pnl) / PAPER_START_EQUITY) * 100,
+            equity,
+            peak_equity: peak,
+            day_pnl_pct: round(((equity - dayStart) / (dayStart || 1)) * 100, 4),
+            total_pnl_pct: round(((equity - PAPER_START_EQUITY) / PAPER_START_EQUITY) * 100, 4),
+            daily_drawdown_pct: round(((peak - equity) / (peak || 1)) * 100, 4),
+            total_drawdown_pct: round(((peak - equity) / (peak || 1)) * 100, 4),
+            expectancy_r: trades ? (stats.expectancy_r * (trades - 1) + (allowed ? trade.r_multiple : 0)) / trades : 0,
+            last_signal: `${trade.side.toUpperCase()} ${strategy.symbol} · ${trade.exit_reason}`,
+            last_update: new Date().toISOString(),
+            parameters: strategy.parameters ?? {},
+            recent: [log, ...stats.recent].slice(0, 40),
+          },
+          log,
+        );
+      }
+    } catch {
+      /* a failed tick must not kill the loop */
+    } finally {
+      paperRunning.current = false;
+    }
+  }, [commitStats]);
+
+  // Drive every armed paper session off a single interval.
+  const armedCount = strategies.filter((item) => item.paper_trading).length;
+  useEffect(() => {
+    if (!armedCount || !canEdit) return;
+    const timer = setInterval(() => void paperTick(), PAPER_TICK_MS);
+    return () => clearInterval(timer);
+  }, [armedCount, canEdit, paperTick]);
+
+  const togglePaperTrading = useCallback(
+    async (strategy: Strategy, enabled: boolean) => {
+      if (!requireAccount("Paper trading")) return;
+      setPaperBusy((current) => ({ ...current, [strategy.id]: true }));
+      try {
+        await dataStore.updateStrategy(strategy.id, {
+          paper_trading: enabled,
+          status: enabled ? "paper" : strategy.status,
+        });
+      } finally {
+        setPaperBusy((current) => ({ ...current, [strategy.id]: false }));
+      }
+      if (enabled) {
+        delete paperQueues.current[strategy.id];
+        commitStats(
+          strategy.id,
+          paperStatsRef.current[strategy.id] ?? emptyPaperStats(strategy, true),
+        );
+        void paperTick();
+        notify({
+          kind: "success",
+          title: `${strategy.name} · paper session started`,
+          detail: "Signals are replayed through the Prop-Firm Shield. Open the paper console to watch fills.",
+        });
+      } else {
+        const stats = paperStatsRef.current[strategy.id];
+        if (stats) commitStats(strategy.id, { ...stats, running: false });
+        notify({ kind: "info", title: `${strategy.name} · paper session paused` });
+      }
+      await refresh();
+    },
+    [commitStats, notify, paperTick, refresh, requireAccount],
+  );
+
+  const resetPaperSession = useCallback(
+    async (strategy: Strategy) => {
+      if (!requireAccount("Resetting the paper session")) return;
+      delete paperQueues.current[strategy.id];
+      commitStats(strategy.id, emptyPaperStats(strategy, Boolean(strategy.paper_trading)));
+      notify({ kind: "info", title: "Paper session reset" });
+    },
+    [commitStats, notify, requireAccount],
   );
 
   /* ------------------------------------------------------------------ */
@@ -488,6 +861,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   /* ------------------------------------------------------------------ */
   const runPaperSession = useCallback(
     async (strategy: Strategy, nTrades = 10) => {
+      if (!requireAccount("Running a paper session")) return null;
       const currentSettings = settingsRef.current;
       const shieldConfig = {
         maxDailyDrawdownPct: currentSettings.MAX_DAILY_DRAWDOWN,
@@ -504,9 +878,9 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       });
       const trades = report.trades.slice(-Math.max(1, nTrades));
 
-      let equity = account.equity;
-      const dayStart = account.day_start_equity;
-      let peak = account.peak_equity;
+      let equity = accountRef.current.equity;
+      const dayStart = accountRef.current.day_start_equity;
+      let peak = accountRef.current.peak_equity;
       let executed = 0;
       let blocked = 0;
 
@@ -545,7 +919,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
           blocked_reason: decision.allowed ? null : decision.reason,
           closed_at: new Date().toISOString(),
           day_pnl_pct: round(((equity - dayStart) / (dayStart || 1)) * 100, 4),
-          total_pnl_pct: round(((equity - account.starting_equity) / (account.starting_equity || 1)) * 100, 4),
+          total_pnl_pct: round(
+            ((equity - accountRef.current.starting_equity) /
+              (accountRef.current.starting_equity || 1)) *
+              100,
+            4,
+          ),
           equity_after: round(equity, 4),
           meta: { exit_reason: trade.exit_reason, decision },
         });
@@ -568,10 +947,15 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         blocked,
         equity,
         day_pnl_pct: round(((equity - dayStart) / (dayStart || 1)) * 100, 4),
-        total_pnl_pct: round(((equity - account.starting_equity) / (account.starting_equity || 1)) * 100, 4),
+        total_pnl_pct: round(
+          ((equity - accountRef.current.starting_equity) /
+            (accountRef.current.starting_equity || 1)) *
+            100,
+          4,
+        ),
       };
     },
-    [account, notify, refresh],
+    [notify, refresh, requireAccount],
   );
 
   const resetAccount = useCallback((equity = 10000) => {
@@ -591,12 +975,52 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
   }, [refresh]);
 
   /* ------------------------------------------------------------------ */
-  /* first-run demo data                                                 */
+  /* fresh start                                                         */
+  /* ------------------------------------------------------------------ */
+  const resetEverything = useCallback(
+    async (options: { reseed?: boolean } = {}) => {
+      if (!requireAccount("Resetting the studio")) return;
+      await api.resetEngine(user?.id ?? null);
+      await dataStore.resetAll();
+      setStrategies([]);
+      setOptimizations({});
+      setTradeLogs([]);
+      setPaperStats({});
+      setLastCurves({});
+      paperStatsRef.current = {};
+      paperQueues.current = {};
+      resetAccount(10000);
+      demoAttempted.current = !options.reseed;
+      if (options.reseed) {
+        seededUsers.current.delete(user?.id ?? "");
+      }
+      await refresh();
+      notify({
+        kind: "info",
+        title: "Studio reset",
+        detail: options.reseed
+          ? "All of your data was cleared — demo strategies are being regenerated."
+          : "All of your strategies, parameter versions and trade logs were deleted.",
+      });
+    },
+    [notify, refresh, requireAccount, resetAccount, user],
+  );
+
+  /* ------------------------------------------------------------------ */
+  /* first-run demo data (per account)                                   */
   /* ------------------------------------------------------------------ */
   useEffect(() => {
-    if (!ready || demoAttempted.current) return;
-    if (strategies.length > 0) return;
+    if (!ready || !authReady) return;
+    if (isGuest) return; // guests cannot write, so never try to seed for them
+    const owner = user?.id;
+    if (!owner || seededUsers.current.has(owner)) return;
+    if (demoAttempted.current) return;
+    if (strategies.length > 0) {
+      seededUsers.current.add(owner);
+      return;
+    }
     demoAttempted.current = true;
+    seededUsers.current.add(owner);
     (async () => {
       const seeds = [
         {
@@ -647,7 +1071,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ready, strategies.length]);
+  }, [ready, authReady, isGuest, strategies.length, user?.id]);
 
   const value = useMemo<AlphaForgeContextValue>(
     () => ({
@@ -660,6 +1084,13 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       engineStatus,
       storeMode: getSupabaseClient() ? "supabase" : storeMode,
       toasts,
+      mt5Status,
+      mt5Busy,
+      paperStats,
+      paperBusy,
+      lastCurves,
+      canEdit,
+      requireAccount,
       notify,
       dismissToast,
       refresh,
@@ -670,11 +1101,17 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       runAnalyze,
       rollback,
       toggleAutonomous,
+      togglePaperTrading,
+      resetPaperSession,
       setStatus: setStrategyStatus,
       removeStrategy,
       runPaperSession,
       resetAccount,
       clearTrades,
+      refreshMt5,
+      connectMt5,
+      disconnectMt5,
+      resetEverything,
     }),
     [
       ready,
@@ -686,6 +1123,13 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       engineStatus,
       storeMode,
       toasts,
+      mt5Status,
+      mt5Busy,
+      paperStats,
+      paperBusy,
+      lastCurves,
+      canEdit,
+      requireAccount,
       notify,
       dismissToast,
       refresh,
@@ -696,11 +1140,17 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       runAnalyze,
       rollback,
       toggleAutonomous,
+      togglePaperTrading,
+      resetPaperSession,
       setStrategyStatus,
       removeStrategy,
       runPaperSession,
       resetAccount,
       clearTrades,
+      refreshMt5,
+      connectMt5,
+      disconnectMt5,
+      resetEverything,
     ],
   );
 

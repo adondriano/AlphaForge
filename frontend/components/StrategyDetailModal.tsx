@@ -15,11 +15,33 @@ import {
 } from "lucide-react";
 
 import { useAlphaForge } from "./AlphaForgeProvider";
+import EquityChart, { EquityChartLegend } from "./EquityChart";
+import LivePricePanel from "./LivePricePanel";
 import OptimizationHistory from "./OptimizationHistory";
-import { Badge, Modal, ProgressBar, Sparkline, Spinner, cx } from "./ui";
+import { Badge, Modal, ProgressBar, Spinner, cx } from "./ui";
 import { fmt, readinessTone } from "@/lib/format";
 import { OBJECTIVES } from "@/lib/types";
-import type { AnalysisReport } from "@/lib/types";
+import type { AnalysisReport, BacktestCurve } from "@/lib/types";
+
+/** The in-browser engine returns a plain series; wrap it in the chart shape. */
+function syntheticCurve(equity: number[]): BacktestCurve {
+  let peak = equity[0] ?? 0;
+  const drawdown = equity.map((value) => {
+    peak = Math.max(peak, value);
+    return peak ? ((peak - value) / peak) * 100 : 0;
+  });
+  return {
+    equity,
+    drawdown,
+    initial_equity: equity[0] ?? 0,
+    final_equity: equity[equity.length - 1] ?? 0,
+    split_index: Math.floor(equity.length * 0.7),
+    max_drawdown_pct: Math.max(...drawdown, 0),
+    step: 1,
+    bars: equity.length,
+    trades: [],
+  };
+}
 
 export default function StrategyDetailModal({
   open,
@@ -40,12 +62,16 @@ export default function StrategyDetailModal({
     runPaperSession,
     settings,
     engineStatus,
+    lastCurves,
+    mt5Status,
+    connectMt5,
+    mt5Busy,
   } = useAlphaForge();
 
   const strategy = strategies.find((item) => item.id === strategyId) ?? null;
   const versions = strategy ? optimizations[strategy.id] ?? [] : [];
 
-  const [equity, setEquity] = useState<number[]>([]);
+  const [curve, setCurve] = useState<BacktestCurve | null>(null);
   const [loadingCurve, setLoadingCurve] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisReport | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
@@ -58,10 +84,15 @@ export default function StrategyDetailModal({
   useEffect(() => {
     if (!open || !strategy) return;
     setAnalysis(null);
+    // Reuse the curve from the last run if we already have one for this id.
+    if (lastCurves[strategy.id]) setCurve(lastCurves[strategy.id]);
     setLoadingCurve(true);
     runBacktest(strategy.id, { bars: 2000 })
-      .then((report) => setEquity(report?.equity_curve ?? []))
-      .catch(() => setEquity([]))
+      .then((report) => {
+        if (report?.curve) setCurve(report.curve);
+        else if (report?.equity_curve?.length) setCurve(syntheticCurve(report.equity_curve));
+      })
+      .catch(() => undefined)
       .finally(() => setLoadingCurve(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, strategy?.id]);
@@ -102,18 +133,25 @@ export default function StrategyDetailModal({
             <div className="panel p-4">
               <div className="mb-2 flex items-center justify-between">
                 <span className="text-[11px] uppercase tracking-wider text-white/40">
-                  Equity curve · last backtest
+                  Equity &amp; drawdown · last backtest
                 </span>
                 {loadingCurve ? <Spinner /> : null}
               </div>
-              <Sparkline
-                values={equity.length ? equity : [10000, 10000]}
-                height={92}
-                stroke={
-                  (equity.at(-1) ?? 10000) >= (equity[0] ?? 10000) ? "#2dd4a7" : "#fb7185"
-                }
-              />
-              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {curve ? (
+                <>
+                  <EquityChart
+                    curve={curve}
+                    drawdownLimitPct={settings.MAX_TOTAL_DRAWDOWN}
+                    height={240}
+                  />
+                  <EquityChartLegend curve={curve} />
+                </>
+              ) : (
+                <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-white/10 text-xs text-white/40">
+                  {loadingCurve ? "Running backtest…" : "No backtest run yet."}
+                </div>
+              )}
+              <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 <MiniMetric label="Win rate" value={fmt.pct(strategy.win_rate)} />
                 <MiniMetric label="Profit factor" value={fmt.num(strategy.profit_factor)} />
                 <MiniMetric label="Expectancy" value={fmt.r(strategy.expectancy_r)} />
@@ -169,7 +207,8 @@ export default function StrategyDetailModal({
                 onClick={async () => {
                   const result = await runPaperSession(strategy, 8);
                   if (result) {
-                    setEquity((current) => [...current, result.equity]);
+                    const report = await runBacktest(strategy.id, { bars: 2000 });
+                    if (report?.curve) setCurve(report.curve);
                   }
                 }}
               >
@@ -177,6 +216,14 @@ export default function StrategyDetailModal({
               </button>
             </div>
           </div>
+
+          {/* ------------------------------------------------ live market */}
+          <LivePricePanel
+            symbol={strategy.symbol}
+            timeframe={strategy.timeframe}
+            status={mt5Status}
+            onConnect={mt5Busy ? undefined : () => void connectMt5()}
+          />
 
           {/* ------------------------------------------------ analyzer */}
           <div className="panel p-4">
@@ -379,7 +426,7 @@ export default function StrategyDetailModal({
                     try {
                       await runOptimize(strategy, { objective, nTrials: trials, bars: 2400 });
                       const report = await runBacktest(strategy.id, { bars: 2000 });
-                      if (report) setEquity(report.equity_curve);
+                      if (report?.curve) setCurve(report.curve);
                     } finally {
                       setOptimizing(false);
                     }
@@ -400,7 +447,7 @@ export default function StrategyDetailModal({
                 try {
                   await rollback(strategy, version);
                   const report = await runBacktest(strategy.id, { bars: 2000 });
-                  if (report) setEquity(report.equity_curve);
+                  if (report?.curve) setCurve(report.curve);
                   setAnalysis(null);
                 } finally {
                   setBusyVersion(null);

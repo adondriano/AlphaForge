@@ -2,8 +2,19 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, Flame, Settings, SlidersHorizontal, Database, Cpu } from "lucide-react";
+import {
+  Activity,
+  Flame,
+  LogIn,
+  LogOut,
+  Settings,
+  SlidersHorizontal,
+  Database,
+  Cpu,
+  User as UserIcon,
+} from "lucide-react";
 
+import { useAuth } from "@/lib/auth";
 import { useAlphaForge } from "./AlphaForgeProvider";
 import { cx } from "./ui";
 
@@ -16,6 +27,7 @@ const LINKS = [
 export default function Nav() {
   const pathname = usePathname();
   const { engineStatus, storeMode } = useAlphaForge();
+  const { user, isGuest, ready: authReady, signOut, configured } = useAuth();
 
   return (
     <header className="sticky top-0 z-40 -mx-4 mb-6 border-b border-white/5 bg-ink-950/80 px-4 py-3 backdrop-blur-md sm:-mx-6 sm:px-6">
@@ -74,6 +86,36 @@ export default function Nav() {
             <span className="h-1.5 w-1.5 animate-pulseline rounded-full bg-forge-amber" />
             Shield 3.5 / 5.0%
           </span>
+
+          {configured ? (
+            authReady && isGuest ? (
+              <Link
+                href="/login"
+                className="chip border-white/10 bg-white/[0.04] text-white/65 transition hover:border-white/25 hover:text-white"
+              >
+                <LogIn size={12} />
+                Sign in
+              </Link>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span
+                  className="chip max-w-[180px] border-forge-mint/25 bg-forge-mint/10 text-forge-mint"
+                  title={user?.email ?? undefined}
+                >
+                  <UserIcon size={12} />
+                  <span className="truncate">{user?.email ?? "signed in"}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  className="chip border-white/10 bg-white/[0.04] text-white/55 transition hover:border-white/25 hover:text-white"
+                  title="Sign out"
+                >
+                  <LogOut size={12} />
+                </button>
+              </div>
+            )
+          ) : null}
         </div>
       </div>
     </header>

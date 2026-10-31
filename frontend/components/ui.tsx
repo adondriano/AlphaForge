@@ -41,12 +41,19 @@ export function Badge({
   children,
   tone = "neutral",
   className,
+  title,
 }: {
   children: ReactNode;
   tone?: Tone;
   className?: string;
+  /** Native tooltip — used to surface shield block reasons. */
+  title?: string;
 }) {
-  return <span className={cx("chip", TONES[tone], className)}>{children}</span>;
+  return (
+    <span className={cx("chip", TONES[tone], className)} title={title}>
+      {children}
+    </span>
+  );
 }
 
 export function Stat({
@@ -201,12 +208,15 @@ export function Modal({
   title,
   children,
   wide,
+  width,
 }: {
   open: boolean;
   onClose: () => void;
   title: ReactNode;
   children: ReactNode;
   wide?: boolean;
+  /** Tailwind max-width class; wins over `wide` when both are given. */
+  width?: string;
 }) {
   if (!open) return null;
   return (
@@ -214,7 +224,7 @@ export function Modal({
       <div
         className={cx(
           "panel animate-slideUp w-full bg-ink-900/95 p-0",
-          wide ? "max-w-5xl" : "max-w-2xl",
+          width ?? (wide ? "max-w-5xl" : "max-w-2xl"),
         )}
       >
         <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">

@@ -336,3 +336,89 @@ def test_paper_run_streams_shielded_trades(client):
     assert run["summary"]["executed"] + run["summary"]["blocked"] == 5
     logs = client.get("/api/trade-logs", params={"strategy_id": strategy_id}).json()
     assert logs["count"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# backtest chart payload
+# ---------------------------------------------------------------------------
+def test_backtest_returns_chart_curve(client):
+    response = client.post(
+        "/api/strategies/backtest/compute",
+        json={"spec": SAMPLE_SPEC, "bars": 1200},
+    )
+    assert response.status_code == 200
+    curve = response.json()["curve"]
+    assert curve["equity"], "equity series must not be empty"
+    assert len(curve["equity"]) == len(curve["drawdown"])
+    assert curve["initial_equity"] == curve["equity"][0]
+    assert curve["final_equity"] == curve["equity"][-1]
+    assert 0 <= curve["split_index"] < len(curve["equity"])
+    assert curve["max_drawdown_pct"] >= 0
+    # drawdown is a percentage of the running peak, never negative
+    assert all(d >= 0 for d in curve["drawdown"])
+    assert curve["bars"] > 0
+    for marker in curve["trades"]:
+        assert marker["side"] in ("long", "short")
+        assert marker["sample"] in ("in", "out")
+
+
+def test_backtest_curve_is_downsampled(client):
+    small = client.post(
+        "/api/strategies/backtest/compute", json={"spec": SAMPLE_SPEC, "bars": 600}
+    ).json()["curve"]
+    big = client.post(
+        "/api/strategies/backtest/compute", json={"spec": SAMPLE_SPEC, "bars": 6000}
+    ).json()["curve"]
+    # 10x the bars must not mean 10x the payload
+    assert len(big["equity"]) <= len(small["equity"]) * 3 + 10
+
+
+# ---------------------------------------------------------------------------
+# MetaTrader 5 bridge
+# ---------------------------------------------------------------------------
+def test_mt5_status_exposes_credentials_state(client):
+    payload = client.get("/api/mt5/status").json()
+    assert "available" in payload and "connected" in payload and "mode" in payload
+    creds = payload["credentials"]
+    for key in ("login", "password", "server", "path"):
+        assert isinstance(creds[key], bool)
+
+
+def test_mt5_connect_without_terminal_reports_a_reason(client):
+    payload = client.post(
+        "/api/mt5/connect", json={"login": "1", "password": "x", "server": "y"}
+    ).json()
+    assert payload["connected"] is False
+    assert payload["reason"], "the UI needs an explanation, not a silent failure"
+
+
+def test_mt5_market_data_degrades_without_terminal(client):
+    price = client.get("/api/mt5/price", params={"symbol": "XAUUSD"}).json()
+    assert price["available"] is False
+    assert price["symbol"] == "XAUUSD"
+    assert price.get("reason")
+
+    candles = client.get(
+        "/api/mt5/candles", params={"symbol": "XAUUSD", "timeframe": "H1", "count": 50}
+    ).json()
+    assert candles["available"] is False
+    assert candles["candles"] == []
+    assert candles["reason"]
+
+
+def test_mt5_disconnect_is_safe(client):
+    payload = client.post("/api/mt5/disconnect").json()
+    assert payload["connected"] is False
+
+
+# ---------------------------------------------------------------------------
+# reset
+# ---------------------------------------------------------------------------
+def test_reset_wipes_the_store(client):
+    assert len(client.get("/api/strategies").json()["strategies"]) > 0
+    response = client.post("/api/reset", json={"scope": "all"})
+    assert response.status_code == 200
+    assert response.json()["removed"] > 0
+    assert len(client.get("/api/strategies").json()["strategies"]) == 0
+    # restore for anything that runs afterwards
+    client.post("/api/seed", params={"force": True})

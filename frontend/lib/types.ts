@@ -65,6 +65,10 @@ export interface Strategy {
   risk_profile: RiskProfile;
   status: StrategyStatus;
   autonomous: boolean;
+  /** Paper trading routes signals through the shield without sending orders. */
+  paper_trading: boolean;
+  /** Owning Supabase Auth account. Rows with no owner are shared read-only. */
+  user_id?: string | null;
   win_rate: number;
   total_trades: number;
   net_return_pct: number;
@@ -94,6 +98,7 @@ export interface Optimization {
   is_active: boolean;
   is_baseline: boolean;
   notes: string;
+  user_id?: string | null;
   created_at?: string;
 }
 
@@ -116,6 +121,7 @@ export interface TradeLog {
   closed_at?: string | null;
   status: "open" | "closed" | "blocked";
   blocked_reason?: string | null;
+  user_id?: string | null;
   day_pnl_pct?: number;
   total_pnl_pct?: number;
   equity_after?: number | null;
@@ -139,11 +145,36 @@ export interface BacktestTrade {
   sample: "in" | "out";
 }
 
+/** Chart-ready series produced by the engine alongside the metrics. */
+export interface BacktestCurve {
+  /** Downsampled equity, one point per `step` bars. */
+  equity: number[];
+  /** Running drawdown in percent, same length as `equity`. */
+  drawdown: number[];
+  initial_equity: number;
+  final_equity: number;
+  /** Index where the in-sample split ends and out-of-sample begins. */
+  split_index: number;
+  max_drawdown_pct: number;
+  step: number;
+  bars: number;
+  trades: {
+    i: number;
+    x: number;
+    side: "long" | "short";
+    pnl: number;
+    r: number;
+    reason: string;
+    sample: "in" | "out";
+  }[];
+}
+
 export interface BacktestResult {
   metrics: Metrics;
   in_sample: Metrics;
   out_of_sample: Metrics;
   equity_curve: number[];
+  curve?: BacktestCurve;
   trades: BacktestTrade[];
   bars_used: number;
   seed: number | null;
@@ -249,12 +280,107 @@ export interface RiskDecision {
   breach?: string | null;
 }
 
+export type Mt5Mode = "live" | "shadow" | "unavailable";
+
+export interface Mt5Status {
+  available: boolean;
+  connected: boolean;
+  mode: Mt5Mode;
+  configured: boolean;
+  reason?: string;
+  account?: {
+    login?: number | null;
+    server?: string | null;
+    balance?: number | null;
+    equity?: number | null;
+    margin?: number | null;
+    free_margin?: number | null;
+    currency?: string | null;
+    leverage?: number | null;
+    name?: string | null;
+    broker?: string | null;
+  } | null;
+  terminal?: {
+    name?: string | null;
+    company?: string | null;
+    path?: string | null;
+    build?: number | null;
+    trade_allowed?: boolean | null;
+    connected?: boolean | null;
+  } | null;
+  credentials?: {
+    login: boolean;
+    password: boolean;
+    server: boolean;
+    path: boolean;
+  } | null;
+}
+
+export interface Mt5Quote {
+  available: boolean;
+  symbol: string;
+  bid?: number;
+  ask?: number;
+  last?: number;
+  spread?: number;
+  digits?: number;
+  volume?: number;
+  time?: number;
+  server_time?: string;
+  reason?: string;
+}
+
+export interface Mt5Candle {
+  t: number;
+  o: number;
+  h: number;
+  l: number;
+  c: number;
+  v: number;
+}
+
+export interface Mt5CandleSeries {
+  available: boolean;
+  symbol: string;
+  timeframe: string;
+  digits?: number;
+  candles: Mt5Candle[];
+  change?: number;
+  change_pct?: number;
+  reason?: string;
+}
+
+/** Live snapshot of one strategy's paper-trading session. */
+export interface PaperStats {
+  strategy_id: string;
+  running: boolean;
+  trades: number;
+  wins: number;
+  losses: number;
+  blocked: number;
+  open: number;
+  net_pnl: number;
+  net_pnl_pct: number;
+  equity: number;
+  peak_equity: number;
+  day_pnl_pct: number;
+  total_pnl_pct: number;
+  daily_drawdown_pct: number;
+  total_drawdown_pct: number;
+  expectancy_r: number;
+  last_signal: string | null;
+  last_update: string | null;
+  parameters: Record<string, number>;
+  recent: TradeLog[];
+}
+
 export interface AppSettings {
   NEXT_PUBLIC_SUPABASE_URL: string;
   NEXT_PUBLIC_SUPABASE_ANON_KEY: string;
   SUPABASE_SERVICE_ROLE_KEY: string;
   MT5_PATH: string;
   MT5_LOGIN: string;
+  MT5_PASSWORD: string;
   MT5_SERVER: string;
   OPENAI_API_KEY: string;
   OPENAI_MODEL: string;
@@ -279,6 +405,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   SUPABASE_SERVICE_ROLE_KEY: "",
   MT5_PATH: "",
   MT5_LOGIN: "",
+  MT5_PASSWORD: "",
   MT5_SERVER: "",
   OPENAI_API_KEY: "",
   OPENAI_MODEL: "gpt-4o-mini",

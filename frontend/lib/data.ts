@@ -44,6 +44,23 @@ function writeLocal<T>(key: string, rows: T[]) {
   }
 }
 
+/**
+ * The signed-in account. Every insert is stamped with it so row-level security
+ * can scope ownership; guests (null) simply cannot write.
+ */
+let currentUserId: string | null = null;
+
+export function setCurrentUserId(id: string | null) {
+  currentUserId = id;
+}
+
+export function getCurrentUserId(): string | null {
+  return currentUserId;
+}
+
+const withOwner = (row: Record<string, unknown>): Record<string, unknown> =>
+  row.user_id === undefined ? { ...row, user_id: currentUserId } : row;
+
 export const newId = (): string => {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -75,6 +92,8 @@ export function toStrategy(row: Record<string, unknown>): Strategy {
     },
     status: (row.status as Strategy["status"]) ?? "draft",
     autonomous: Boolean(row.autonomous),
+    paper_trading: Boolean(row.paper_trading),
+    user_id: (row.user_id as string) ?? null,
     win_rate: num(row.win_rate),
     total_trades: num(row.total_trades),
     net_return_pct: num(row.net_return_pct),
@@ -106,6 +125,7 @@ export function toOptimization(row: Record<string, unknown>): Optimization {
     is_active: Boolean(row.is_active),
     is_baseline: Boolean(row.is_baseline),
     notes: String(row.notes ?? ""),
+    user_id: (row.user_id as string) ?? null,
     created_at: row.created_at as string | undefined,
   };
 }
@@ -130,6 +150,7 @@ export function toTradeLog(row: Record<string, unknown>): TradeLog {
     closed_at: (row.closed_at as string) ?? null,
     status: (row.status as TradeLog["status"]) ?? "open",
     blocked_reason: (row.blocked_reason as string) ?? null,
+    user_id: (row.user_id as string) ?? null,
     day_pnl_pct: num(row.day_pnl_pct),
     total_pnl_pct: num(row.total_pnl_pct),
     equity_after: row.equity_after === null || row.equity_after === undefined ? null : num(row.equity_after),
@@ -224,7 +245,7 @@ class DataStore {
 
   async insertStrategy(row: Record<string, unknown>): Promise<Strategy> {
     const client = getSupabaseClient();
-    const payload = { ...row, id: row.id ?? newId() };
+    const payload = { ...withOwner(row), id: row.id ?? newId() };
     if (client) {
       const { data, error } = await client.from("strategies").insert(payload).select().single();
       if (!error && data) {
@@ -296,7 +317,7 @@ class DataStore {
 
   async insertOptimization(row: Record<string, unknown>): Promise<Optimization> {
     const payload = {
-      ...row,
+      ...withOwner(row),
       id: row.id ?? newId(),
       created_at: row.created_at ?? new Date().toISOString(),
     };
@@ -355,7 +376,7 @@ class DataStore {
 
   async insertTradeLog(row: Record<string, unknown>): Promise<TradeLog> {
     const payload = {
-      ...row,
+      ...withOwner(row),
       id: row.id ?? newId(),
       opened_at: row.opened_at ?? new Date().toISOString(),
     };
@@ -383,6 +404,31 @@ class DataStore {
       await client.from("trade_logs").delete().gt("opened_at", "1970-01-01");
       return;
     }
+    writeLocal(LS.tradeLogs, []);
+  }
+
+  /**
+   * Fresh start: delete the signed-in user's strategies (cascading to their
+   * parameter versions and trade logs) and clear the local mirror.
+   */
+  async resetAll(): Promise<void> {
+    const client = getSupabaseClient();
+    if (client) {
+      const mine = await client
+        .from("strategies")
+        .select("id")
+        .eq("user_id", currentUserId ?? "00000000-0000-0000-0000-000000000000");
+      for (const row of (mine.data ?? []) as { id: string }[]) {
+        await client.from("strategies").delete().eq("id", row.id);
+      }
+      // Defensive sweep for any orphaned child rows.
+      if (currentUserId) {
+        await client.from("optimizations").delete().eq("user_id", currentUserId);
+        await client.from("trade_logs").delete().eq("user_id", currentUserId);
+      }
+    }
+    writeLocal(LS.strategies, []);
+    writeLocal(LS.optimizations, []);
     writeLocal(LS.tradeLogs, []);
   }
 

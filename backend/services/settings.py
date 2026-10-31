@@ -23,6 +23,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     # ---- Execution ------------------------------------------------------
     "MT5_PATH": "",
     "MT5_LOGIN": "",
+    "MT5_PASSWORD": "",
     "MT5_SERVER": "",
     # ---- LLM orchestration ----------------------------------------------
     "OPENAI_API_KEY": "",
@@ -44,7 +45,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "AUTONOMOUS_DEFAULT": False,
 }
 
-SECRET_KEYS = {"SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY"}
+SECRET_KEYS = {"SUPABASE_SERVICE_ROLE_KEY", "OPENAI_API_KEY", "MT5_PASSWORD"}
 
 
 class SettingsUpdate(BaseModel):
@@ -55,6 +56,7 @@ class SettingsUpdate(BaseModel):
     SUPABASE_SERVICE_ROLE_KEY: str | None = None
     MT5_PATH: str | None = None
     MT5_LOGIN: str | None = None
+    MT5_PASSWORD: str | None = None
     MT5_SERVER: str | None = None
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str | None = None
@@ -83,6 +85,7 @@ class Settings(BaseModel):
     SUPABASE_SERVICE_ROLE_KEY: str = ""
     MT5_PATH: str = ""
     MT5_LOGIN: str = ""
+    MT5_PASSWORD: str = ""
     MT5_SERVER: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
@@ -120,7 +123,9 @@ class Settings(BaseModel):
 
     @property
     def has_mt5(self) -> bool:
-        return bool(self.MT5_PATH and self.MT5_LOGIN and self.MT5_SERVER)
+        """Credentials present. MT5_PATH is optional — ``initialize()`` finds
+        the installed terminal on its own when it is blank."""
+        return bool(self.MT5_LOGIN and self.MT5_PASSWORD and self.MT5_SERVER)
 
     @property
     def llm_provider(self) -> str:

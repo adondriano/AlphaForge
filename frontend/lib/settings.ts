@@ -9,6 +9,7 @@ export const SETTINGS_KEY = "alphaforge.settings";
 export const SECRET_FIELDS: (keyof AppSettings)[] = [
   "SUPABASE_SERVICE_ROLE_KEY",
   "OPENAI_API_KEY",
+  "MT5_PASSWORD",
 ];
 
 export function loadSettings(): AppSettings {

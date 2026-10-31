@@ -246,6 +246,54 @@ class Store:
         self._remote(STRATEGIES, build, lambda: [])
         return True
 
+    def reset(self, user_id: Optional[str] = None, scope: str = "user") -> int:
+        """Delete every strategy (cascading to optimizations and trade logs).
+
+        ``scope='user'`` only removes rows owned by ``user_id``; ``scope='all'``
+        is the local/single-tenant wipe. Returns the number of strategies removed.
+        """
+        own_only = scope != "all" and bool(user_id)
+        rows = self.list_strategies()
+        if own_only:
+            rows = [r for r in rows if r.get("user_id") == user_id]
+
+        removed = 0
+        for row in rows:
+            try:
+                self.delete_strategy(row["id"])
+                removed += 1
+            except Exception:
+                continue
+
+        if not self.enabled:
+            with self._lock:
+                if own_only:
+                    keep = lambda r: r.get("user_id") != user_id  # noqa: E731
+                    self._memory[STRATEGIES] = [r for r in self._memory[STRATEGIES] if keep(r)]
+                    self._memory[OPTIMIZATIONS] = [
+                        r for r in self._memory[OPTIMIZATIONS] if keep(r)
+                    ]
+                    self._memory[TRADE_LOGS] = [r for r in self._memory[TRADE_LOGS] if keep(r)]
+                else:
+                    self._memory[STRATEGIES] = []
+                    self._memory[OPTIMIZATIONS] = []
+                    self._memory[TRADE_LOGS] = []
+                self._save_local_state()
+            return removed
+
+        # Strategies cascade, but clear any orphaned rows defensively.
+        for table in (OPTIMIZATIONS, TRADE_LOGS):
+            try:
+                builder = self._client.table(table).delete()
+                if own_only:
+                    builder = builder.eq("user_id", user_id)
+                else:
+                    builder = builder.neq("id", "00000000-0000-0000-0000-000000000000")
+                self._run(table, builder)
+            except Exception:
+                continue
+        return removed
+
     # ------------------------------------------------------------------
     # optimizations (parameter lineage)
     # ------------------------------------------------------------------

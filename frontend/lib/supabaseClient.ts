@@ -55,7 +55,14 @@ export function getSupabaseClient(): SupabaseClient | null {
   if (cached && cachedKey === signature) return cached;
   try {
     cached = createClient(url, anonKey, {
-      auth: { persistSession: false, autoRefreshToken: false },
+      // Sessions must persist so a page reload keeps you signed in, and the
+      // token has to refresh so long optimization runs do not drop mid-flight.
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        storageKey: "alphaforge.auth",
+      },
       realtime: { params: { eventsPerSecond: 10 } },
     });
     cachedKey = signature;

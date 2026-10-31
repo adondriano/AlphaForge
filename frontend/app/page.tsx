@@ -6,6 +6,8 @@ import {
   BarChart3,
   Bot,
   Percent,
+  Plug,
+  PlugZap,
   Plus,
   Search,
   Target,
@@ -13,12 +15,13 @@ import {
 } from "lucide-react";
 
 import { useAlphaForge } from "@/components/AlphaForgeProvider";
+import PaperTradingModal from "@/components/PaperTradingModal";
 import RiskPanel from "@/components/RiskPanel";
 import StrategyCard from "@/components/StrategyCard";
 import StrategyCreatorModal from "@/components/StrategyCreatorModal";
 import StrategyDetailModal from "@/components/StrategyDetailModal";
 import TradeTicker from "@/components/TradeTicker";
-import { EmptyState, Spinner, Stat, Toggle, cx } from "@/components/ui";
+import { Badge, EmptyState, Spinner, Stat, Toggle, cx } from "@/components/ui";
 import { fmt, readinessTone } from "@/lib/format";
 import type { Strategy } from "@/lib/types";
 
@@ -32,12 +35,24 @@ export default function DashboardPage() {
     runAnalyze,
     toggleAutonomous,
     notify,
+    canEdit,
+    mt5Status,
+    mt5Busy,
+    connectMt5,
+    disconnectMt5,
+    paperStats,
+    paperBusy,
+    togglePaperTrading,
+    resetPaperSession,
   } = useAlphaForge();
 
   const [creatorOpen, setCreatorOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [paperId, setPaperId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [busyAll, setBusyAll] = useState(false);
+
+  const armedPaper = Object.values(paperStats).filter((session) => session?.running).length;
 
   const totals = useMemo(() => {
     const weightedWin = strategies.reduce(
@@ -113,8 +128,75 @@ export default function DashboardPage() {
     }
   };
 
+  const paperStrategy = strategies.find((item) => item.id === paperId) ?? null;
+
   return (
     <div className="space-y-5">
+      <div
+        className={cx(
+          "panel flex flex-wrap items-center gap-3 px-4 py-3",
+          mt5Status?.connected ? "border-forge-mint/25" : "border-forge-amber/25",
+        )}
+      >
+        {mt5Status?.connected ? (
+          <PlugZap size={16} className="text-forge-mint" />
+        ) : (
+          <Plug size={16} className="text-forge-amber" />
+        )}
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[13px] font-semibold text-white">
+              {mt5Status?.configured === false
+                ? "MetaTrader 5 not configured"
+                : mt5Status?.connected
+                  ? "MetaTrader 5 connected"
+                  : "MetaTrader 5 disconnected"}
+            </span>
+            <Badge tone={mt5Status?.connected ? "mint" : "amber"}>
+              {mt5Status?.connected ? "live feed" : "no feed"}
+            </Badge>
+            {mt5Status?.connected && mt5Status.account ? (
+              <span className="tabular text-[11px] text-white/45">
+                #{mt5Status.account.login} · {mt5Status.account.server} ·{" "}
+                {mt5Status.account.balance != null
+                  ? `${mt5Status.account.currency ?? ""} ${mt5Status.account.balance.toFixed(2)}`
+                  : "balance n/a"}
+              </span>
+            ) : null}
+          </div>
+          <div className="text-[11.5px] text-white/45">
+            {mt5Status?.connected
+              ? "Feeding live ticks into the Prop-Firm Shield and the strategy live chart."
+              : (mt5Status?.reason ??
+                "Charts, backtests and analysis work without MT5. Live prices and real execution need the Python engine running on the machine that hosts your MT5 terminal.")}
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {armedPaper ? (
+            <Badge tone="cyan">{armedPaper} paper session(s) armed</Badge>
+          ) : null}
+          {canEdit ? (
+            mt5Status?.connected ? (
+              <button
+                className="btn-ghost text-[12px]"
+                disabled={mt5Busy}
+                onClick={() => void disconnectMt5()}
+              >
+                {mt5Busy ? <Spinner /> : <Plug size={14} />} Disconnect
+              </button>
+            ) : (
+              <button
+                className="btn-ghost text-[12px]"
+                disabled={mt5Busy}
+                onClick={() => void connectMt5()}
+              >
+                {mt5Busy ? <Spinner /> : <PlugZap size={14} />} Connect MT5
+              </button>
+            )
+          ) : null}
+        </div>
+      </div>
+
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
         <Stat
           label="Win rate"
@@ -231,12 +313,23 @@ export default function DashboardPage() {
               onBacktest={() => runBacktest(strategy.id, { bars: 2400 })}
               onOptimize={() => optimizeStrategy(strategy)}
               onAnalyze={() => analyzeStrategy(strategy)}
+              onOpenPaper={() => setPaperId(strategy.id)}
             />
           ))}
         </div>
       )}
 
       <StrategyCreatorModal open={creatorOpen} onClose={() => setCreatorOpen(false)} />
+      {paperStrategy ? (
+        <PaperTradingModal
+          strategy={paperStrategy}
+          stats={paperStats[paperStrategy.id] ?? null}
+          busy={Boolean(paperBusy[paperStrategy.id])}
+          onClose={() => setPaperId(null)}
+          onToggle={(enabled) => void togglePaperTrading(paperStrategy, enabled)}
+          onResetSession={() => void resetPaperSession(paperStrategy)}
+        />
+      ) : null}
       <StrategyDetailModal
         open={Boolean(detailId)}
         strategyId={detailId}
