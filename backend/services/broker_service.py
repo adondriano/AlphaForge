@@ -29,6 +29,7 @@ from services.brokers.base import (
     MODE_LIVE,
     MODE_SHADOW,
     MODE_UNAVAILABLE,
+    describe_exception,
     shadow_fill,
 )
 
@@ -126,7 +127,9 @@ class BrokerService:
             result = provider.status(creds)
         except Exception as exc:
             self._last_error = str(exc)
-            result = self._halted(f"{provider.label} status call failed: {exc}")
+            result = self._halted(
+                f"{provider.label} status call failed: {describe_exception(exc)}"
+            )
         result.setdefault("provider", provider.id)
         result["connection_id"] = row.get("id")
         result["warnings"] = self.warnings_for(provider, creds)

@@ -38,6 +38,7 @@ from .base import (
     BrokerProvider,
     CredentialField,
     candles_result,
+    describe_exception,
     instrument_class,
     now_iso,
     price_result,
@@ -275,6 +276,23 @@ class ExnessProvider(BrokerProvider):
                     f"that exact value into the Gateway URL field."
                 ) from exc
             raise
+        except Exception as exc:
+            # Not an API rejection at all — the host could not be reached. With
+            # the placeholder gateway that is the expected outcome, and a bare
+            # errno here («[Errno 16] Device or resource busy») tells nobody
+            # anything, so name the cause and keep the detail.
+            if not supplied:
+                raise ExnessError(
+                    f"Could not reach the gateway ({gateway}): "
+                    f"{describe_exception(exc)} — no Gateway URL was given, so "
+                    f"the built-in example {DEFAULT_GATEWAY} was used. Exness "
+                    f"issues the real Gateway per account in Key Management "
+                    f"(DNS widget); paste that exact value into the Gateway URL "
+                    f"field."
+                ) from exc
+            raise ExnessError(
+                f"Could not reach the gateway ({gateway}): {describe_exception(exc)}"
+            ) from exc
         value = data.get("access_point")
         if not isinstance(value, str) or not value:
             raise ExnessError("Access point discovery returned no access_point.")
@@ -408,7 +426,7 @@ class ExnessProvider(BrokerProvider):
             )
         except Exception as exc:
             return {"available": False, "connected": False, "mode": "unavailable",
-                    "configured": True, "reason": str(exc)}
+                    "configured": True, "reason": describe_exception(exc)}
 
         account = data.get("account") if isinstance(data.get("account"), dict) else data
         return {
@@ -446,7 +464,7 @@ class ExnessProvider(BrokerProvider):
         try:
             ticks = self._stream_ticks(creds, [symbol], timeout=4.0)
         except Exception as exc:
-            return unavailable(str(exc), symbol=symbol)
+            return unavailable(describe_exception(exc), symbol=symbol)
 
         tick = ticks.get(symbol)
         if not tick:
@@ -494,7 +512,7 @@ class ExnessProvider(BrokerProvider):
                 creds, "GET", host, f"/v1/configuration/accounts/{account_id}/instruments"
             )
         except Exception as exc:
-            return {"available": False, "symbols": [], "reason": str(exc)}
+            return {"available": False, "symbols": [], "reason": describe_exception(exc)}
 
         rows = data.get("instruments") or data.get("data") or []
         names = sorted({str(r.get("name") or r.get("instrument") or r) for r in rows if r})
@@ -542,7 +560,7 @@ class ExnessProvider(BrokerProvider):
                 timeout=15.0,
             )
         except Exception as exc:
-            return {**shadow_fill(order, str(exc)), "mode": "live"}
+            return {**shadow_fill(order, describe_exception(exc)), "mode": "live"}
 
         return {
             # Exness ACKs first and settles asynchronously, so "executed" here

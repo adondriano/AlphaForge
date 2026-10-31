@@ -29,8 +29,30 @@ Rules every provider follows
 from __future__ import annotations
 
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def describe_exception(exc: BaseException) -> str:
+    """Type, message and originating frame — enough to act on.
+
+    Providers report failures as ``str(exc)``, which for anything that is not a
+    deliberately-worded error yields a bare OS string like "[Errno 16] Device
+    or resource busy": no class, no location, nothing to search for. Including
+    the type and the last frame turns an opaque errno into a place to look.
+    """
+    name = type(exc).__name__
+    detail = f"{name}: {exc}" if str(exc) else name
+
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        frame = frames[-1]
+        filename = frame.filename.rsplit("/", 1)[-1]
+        cause = describe_exception(exc.__cause__) if exc.__cause__ else ""
+        suffix = f" <- {cause}" if cause else ""
+        detail += f" (at {filename}:{frame.lineno} in {frame.name}){suffix}"
+    return detail
 
 # AlphaForge's canonical timeframe ladder. Providers map these onto whatever
 # granularity naming their own API uses, and drop the ones they cannot serve.

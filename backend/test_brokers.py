@@ -541,3 +541,126 @@ def test_successful_check_clears_the_stored_reason(monkeypatch):
 
     assert recorded["status"] == "connected"
     assert recorded["error"] is None
+
+
+# ---------------------------------------------------------------------------
+# Exception reporting
+#
+# "[Errno 16] Device or resource busy" reached the UI with no class, no
+# location and nothing to search for. Failures must carry enough to find.
+# ---------------------------------------------------------------------------
+
+def test_describe_exception_names_the_class_and_location():
+    """A bare errno is undiagnosable; the type and frame make it findable."""
+    from services.brokers.base import describe_exception
+
+    try:
+        raise OSError(16, "Device or resource busy")
+    except OSError as exc:
+        text = describe_exception(exc)
+
+    assert "OSError" in text
+    assert "[Errno 16] Device or resource busy" in text
+    assert "test_brokers.py" in text
+    assert "in test_describe_exception_names_the_class_and_location" in text
+
+
+def test_describe_exception_includes_the_chained_cause():
+    from services.brokers.base import describe_exception
+
+    try:
+        try:
+            raise ValueError("root cause")
+        except ValueError as inner:
+            raise RuntimeError("outer") from inner
+    except RuntimeError as exc:
+        text = describe_exception(exc)
+
+    assert "RuntimeError: outer" in text
+    assert "ValueError: root cause" in text
+
+
+def test_describe_exception_survives_a_message_less_exception():
+    from services.brokers.base import describe_exception
+
+    try:
+        raise KeyboardInterrupt()
+    except KeyboardInterrupt as exc:
+        text = describe_exception(exc)
+
+    assert text.startswith("KeyboardInterrupt")
+
+
+def test_unreachable_default_gateway_is_named_not_just_the_errno(monkeypatch):
+    """A transport failure must say the gateway was a placeholder."""
+    provider = ExnessProvider()
+
+    def boom(*args, **kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(provider, "_request", boom)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._access_point(creds)
+
+    text = str(excinfo.value)
+    assert "Could not reach the gateway" in text
+    assert "OSError" in text                 # the class, not just the errno
+    assert "test_brokers.py" in text         # and where it came from
+    assert "no Gateway URL was given" in text
+    assert "gateway.exness.com" in text
+
+
+def test_unreachable_supplied_gateway_names_the_host(monkeypatch):
+    """With a real gateway supplied, report it rather than blaming keys."""
+    provider = ExnessProvider()
+
+    def boom(*args, **kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(provider, "_request", boom)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mine.example.com",
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._access_point(creds)
+
+    text = str(excinfo.value)
+    assert "mine.example.com" in text
+    assert "OSError" in text
+    assert "no Gateway URL was given" not in text
+
+
+def test_status_reports_the_class_for_unexpected_failures(monkeypatch):
+    """A provider raising something odd must not surface a bare errno."""
+    import services.broker_service as module
+
+    class _ExplodingProvider:
+        id = "exness"
+        label = "Exness"
+        unsupported = ()
+
+        @staticmethod
+        def status(creds):
+            raise OSError(16, "Device or resource busy")
+
+        @staticmethod
+        def warnings_for(creds):
+            return []
+
+    monkeypatch.setattr("services.broker_service.vault", _FakeVault())
+    monkeypatch.setitem(module.brokers._PROVIDERS, "exness", _ExplodingProvider)
+
+    result = BrokerService().status(None, "u1")
+    assert "OSError" in result["reason"]
+    assert "Device or resource busy" in result["reason"]
+    assert "test_brokers.py" in result["reason"]
