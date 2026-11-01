@@ -660,15 +660,26 @@ export async function deleteBrokerConnection(
   }
 }
 
-export async function brokerPrice(symbol: string, connectionId?: string): Promise<BrokerQuote> {
+export async function brokerPrice(
+  symbol: string,
+  connectionId?: string,
+  token?: string,
+): Promise<BrokerQuote> {
   if (!apiUrl()) return { available: false, symbol, reason: BROKER_UNAVAILABLE.reason };
   const query = `?symbol=${encodeURIComponent(symbol)}${
     connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""
   }`;
+  const offline = { available: false, symbol, reason: BROKER_UNAVAILABLE.reason };
   try {
-    return await get<BrokerQuote>(`/api/broker/price${query}`, 8000);
+    // The engine resolves credentials per account, so this is authenticated
+    // exactly like the status and connections calls. Sending it bare used to
+    // return "the engine received no session token" to a signed-in user, every
+    // two seconds.
+    return token
+      ? await getAuth<BrokerQuote>(`/api/broker/price${query}`, token, 8000)
+      : await get<BrokerQuote>(`/api/broker/price${query}`, 8000);
   } catch {
-    return { available: false, symbol, reason: BROKER_UNAVAILABLE.reason };
+    return offline;
   }
 }
 
@@ -677,6 +688,7 @@ export async function brokerCandles(
   timeframe = "H1",
   count = 120,
   connectionId?: string,
+  token?: string,
 ): Promise<BrokerCandleSeries> {
   const empty = {
     available: false,
@@ -691,22 +703,31 @@ export async function brokerCandles(
     `&timeframe=${encodeURIComponent(timeframe)}&count=${count}` +
     (connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : "");
   try {
-    return await get<BrokerCandleSeries>(`/api/broker/candles${query}`, 10000);
+    return token
+      ? await getAuth<BrokerCandleSeries>(`/api/broker/candles${query}`, token, 10000)
+      : await get<BrokerCandleSeries>(`/api/broker/candles${query}`, 10000);
   } catch {
     return empty;
   }
 }
 
-export async function brokerSymbols(needle = "", connectionId?: string): Promise<string[]> {
+export async function brokerSymbols(
+  needle = "",
+  connectionId?: string,
+  token?: string,
+): Promise<string[]> {
   if (!apiUrl()) return [];
   const query = `?needle=${encodeURIComponent(needle)}${
     connectionId ? `&connection_id=${encodeURIComponent(connectionId)}` : ""
   }`;
   try {
-    const outcome = await get<{ available: boolean; symbols: string[] }>(
-      `/api/broker/symbols${query}`,
-      8000,
-    );
+    const outcome = token
+      ? await getAuth<{ available: boolean; symbols: string[] }>(
+          `/api/broker/symbols${query}`,
+          token,
+          8000,
+        )
+      : await get<{ available: boolean; symbols: string[] }>(`/api/broker/symbols${query}`, 8000);
     return outcome.symbols ?? [];
   } catch {
     return [];

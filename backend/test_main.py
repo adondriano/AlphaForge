@@ -591,6 +591,35 @@ def test_broker_price_reports_the_session_problem(client):
     assert payload["auth_error"] == "no_token"
 
 
+def test_every_broker_endpoint_is_authenticated(client):
+    """No broker endpoint may answer a caller it cannot identify.
+
+    The live panel used to poll price and candles with no token at all, so it
+    reported "the engine received no session token" to a signed-in user every
+    two seconds. These endpoints all resolve credentials per account, so there
+    is no such thing as an anonymous one.
+    """
+    endpoints = [
+        ("get", "/api/broker/status", {}),
+        ("get", "/api/broker/connections", {}),
+        ("get", "/api/broker/price", {"symbol": "XAUUSD"}),
+        ("get", "/api/broker/candles", {"symbol": "XAUUSD", "timeframe": "H1"}),
+        ("get", "/api/broker/symbols", {}),
+    ]
+    for method, path, params in endpoints:
+        payload = getattr(client, method)(path, params=params).json()
+        assert payload.get("auth_error") == "no_token", (path, payload)
+
+    # The write endpoints have no anonymous form at all.
+    assert (
+        client.post(
+            "/api/broker/connections", json={"provider": "exness", "credentials": {}}
+        ).status_code
+        == 401
+    )
+    assert client.delete("/api/broker/connections/abc").status_code == 401
+
+
 class _Settings:
     """Minimal settings stand-in for the broker auth tests."""
 

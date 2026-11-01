@@ -112,6 +112,13 @@ interface AlphaForgeContextValue {
   clearTrades: () => Promise<void>;
 
   refreshBroker: () => Promise<BrokerStatus>;
+  /**
+   * A session token that is valid right now. Anything that calls an
+   * authenticated engine endpoint — live prices and candles included — has to
+   * ask for one of these rather than reading the token out of auth state,
+   * which can be hours stale.
+   */
+  brokerToken: () => Promise<string | undefined>;
   refreshBrokerConnections: () => Promise<void>;
   connectBroker: (
     provider: string,
@@ -1288,6 +1295,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       resetAccount,
       clearTrades,
       refreshBroker,
+      brokerToken: freshToken,
       refreshBrokerConnections,
       connectBroker,
       deleteBrokerConnection: removeBrokerConnection,
@@ -1332,6 +1340,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       resetAccount,
       clearTrades,
       refreshBroker,
+      freshToken,
       refreshBrokerConnections,
       connectBroker,
       removeBrokerConnection,

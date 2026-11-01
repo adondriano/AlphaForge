@@ -14,6 +14,7 @@ import { Activity, AlertTriangle, ArrowDown, ArrowUp, Radio, RefreshCw } from "l
 import * as api from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { BrokerCandle, BrokerQuote, BrokerStatus } from "@/lib/types";
+import { useAlphaForge } from "./AlphaForgeProvider";
 import { Spinner } from "./ui";
 
 const POLL_MS = 2000;
@@ -72,24 +73,32 @@ function CandleChart({ candles }: { candles: BrokerCandle[] }) {
 }
 
 export default function LivePricePanel({ symbol, timeframe, status, onConnect, compact }: Props) {
+  const { brokerToken } = useAlphaForge();
   const [quote, setQuote] = useState<BrokerQuote | null>(null);
   const [candles, setCandles] = useState<BrokerCandle[]>([]);
   const [changePct, setChangePct] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Guards against a slow tick piling requests on top of itself. */
+  const inFlight = useRef(false);
 
   const connected = Boolean(status?.connected);
   const unavailable = !status || status.mode === "unavailable" || !status.available;
 
   const poll = useCallback(
     async (initial = false) => {
-      if (!connected) return;
+      if (!connected || inFlight.current) return;
+      inFlight.current = true;
       if (initial) setLoading(true);
       try {
+        // The engine reads credentials per account, so price and candle calls
+        // are authenticated. Sending them bare made the panel report "the
+        // engine received no session token" to someone who was signed in.
+        const token = await brokerToken();
         const [nextQuote, nextCandles] = await Promise.all([
-          api.brokerPrice(symbol),
-          api.brokerCandles(symbol, timeframe, 60),
+          api.brokerPrice(symbol, undefined, token),
+          api.brokerCandles(symbol, timeframe, 60, undefined, token),
         ]);
         if (nextQuote.available) {
           setQuote(nextQuote);
@@ -104,10 +113,11 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
       } catch {
         /* keep the last good tick on a transient failure */
       } finally {
+        inFlight.current = false;
         if (initial) setLoading(false);
       }
     },
-    [connected, quote, symbol, timeframe],
+    [brokerToken, connected, quote, symbol, timeframe],
   );
 
   useEffect(() => {
