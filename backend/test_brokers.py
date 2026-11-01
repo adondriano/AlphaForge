@@ -162,6 +162,7 @@ def test_exness_accepts_well_formed_credentials():
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mt-gateway.example.com",
+        "ws_url": "wss://mt-ws.example.com",
     }) is None
 
 
@@ -344,6 +345,8 @@ def test_unsupported_symbol_is_halted_not_shadowed(monkeypatch):
             "api_key": "exnsk-x",
             "private_key": VECTOR_KEY_HEX,
             "gateway": "https://mt-gateway.example.com",
+            "ws_url": "wss://mt-ws.example.com",
+        "ws_url": "wss://mt-ws.example.com",
         }),
     )
     result = service.place_order(
@@ -472,6 +475,7 @@ def test_supplied_gateway_failure_does_not_blame_the_default(monkeypatch):
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mine.example.com",
+        "ws_url": "wss://mine.example.com",
     }
     with pytest.raises(ExnessError) as excinfo:
         provider._access_point(creds)
@@ -644,6 +648,7 @@ def test_unreachable_supplied_gateway_names_the_host(monkeypatch):
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mine.example.com",
+        "ws_url": "wss://mine.example.com",
     }
     with pytest.raises(ExnessError) as excinfo:
         provider._access_point(creds)
@@ -744,6 +749,7 @@ def test_exness_retries_a_busy_resolver(monkeypatch):
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mine.example.com",
+        "ws_url": "wss://mine.example.com",
     }
     assert provider._access_point(creds) == "https://ap.example.com"
     assert attempts["n"] == 3
@@ -790,6 +796,7 @@ def test_placeholder_gateway_is_rejected_before_saving():
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://gateway.exness.com",
+        "ws_url": "wss://ws.api.exness.com",
     }
     problem = provider.validate(creds)
     assert problem is not None
@@ -805,6 +812,7 @@ def test_placeholder_gateway_is_rejected_with_trailing_slash():
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://gateway.exness.com/",
+        "ws_url": "wss://ws.api.exness.com/",
     }
     assert provider.validate(creds) is not None
 
@@ -817,6 +825,7 @@ def test_a_real_gateway_passes_validation():
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mt-gateway.example.com",
+        "ws_url": "wss://mt-ws.example.com",
     }
     assert provider.validate(creds) is None
 
@@ -834,6 +843,7 @@ def test_pasted_placeholder_gets_the_hint_on_connect(monkeypatch):
         "api_key": "exnsk-x",
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://gateway.exness.com",
+        "ws_url": "wss://ws.api.exness.com",
     }
     with pytest.raises(ExnessError) as excinfo:
         provider._access_point(creds)
@@ -860,6 +870,76 @@ def test_blanks_are_still_reported_as_missing():
         "private_key": VECTOR_KEY_HEX,
     }
     assert "Gateway URL" in provider.validate(creds)
+
+
+def test_websocket_field_is_required_and_templated():
+    """No REST quote endpoint means no working default for the stream host."""
+    field = next(f for f in ExnessProvider.fields if f.key == "ws_url")
+    assert field.required is True
+    placeholder = field.placeholder or ""
+    assert "<" in placeholder                    # a template, not a real host
+    assert "ws.api.exness.com" not in placeholder
+
+
+def test_example_websocket_url_is_rejected_before_saving():
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
+        "ws_url": "wss://ws.api.exness.com",
+    }
+    text = provider.validate(creds) or ""
+    assert "example value" in text
+    assert "WebSocket" in text
+
+
+def test_a_missing_websocket_url_is_refused_not_dialled(monkeypatch):
+    """The bug this fixes: with no ws_url stored the engine dialled the
+    example host, and the lookup failed with an errno that read like a
+    network fault. Nothing may be dialled at all."""
+    provider = ExnessProvider()
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("the example host must never be connected to")
+
+    monkeypatch.setattr(provider, "_stream_ticks", explode)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
+    }
+    result = provider.price(creds, "XAUUSD")
+
+    assert result["available"] is False
+    reason = result["reason"]
+    assert "WebSocket URL" in reason
+    assert "Key Management" in reason
+    # Not the errno that sent us looking at the network instead.
+    assert "Device or resource busy" not in reason
+
+
+def test_a_stream_failure_names_the_host_it_dialled(monkeypatch):
+    """A transport error with no address in it is undebuggable."""
+    provider = ExnessProvider()
+
+    def boom(*_args, **_kwargs):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr(provider, "_stream_ticks", boom)
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
+        "ws_url": "wss://realtime.example.com",
+    }
+    reason = provider.price(creds, "XAUUSD")["reason"]
+    assert "realtime.example.com" in reason
+    assert "OSError" in reason
 
 
 # ---------------------------------------------------------------------------

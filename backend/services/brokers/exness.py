@@ -60,7 +60,18 @@ SIGN_VERSION = 1
 
 #: Market-data host. Also an example: if the DNS widget gives you a realtime
 #: host, set it in the WebSocket URL field and this is never used.
+#: Example only. Exness issues the real realtime host per account in the same
+#: DNS widget as the Gateway, and there is no public one. Market data is
+#: stream-only, so unlike the Gateway there is nothing to fall back to when
+#: this is missing but a failed connection to a host that does not exist.
 DEFAULT_WS_URL = "wss://ws.api.exness.com"
+
+WS_URL_HINT = (
+    "Exness streams market data over WebSocket only — there is no REST quote "
+    "endpoint to fall back on. Paste the WebSocket host from the DNS widget in "
+    "Exness → Personal Area → Key Management into the WebSocket URL field. "
+    "wss://ws.api.exness.com is only an example and will never connect."
+)
 
 GATEWAY_HINT = (
     "Exness issues the real Gateway per account in the DNS widget in Key "
@@ -195,6 +206,19 @@ def _base_url(value: str) -> str:
     return f"https://{parts.netloc}"
 
 
+def is_placeholder_ws(value: str) -> bool:
+    """True when the value is the example WebSocket host, not a real one."""
+    from urllib.parse import urlsplit
+
+    try:
+        return (
+            urlsplit((value or "").strip()).hostname
+            == urlsplit(DEFAULT_WS_URL).hostname
+        )
+    except Exception:
+        return False
+
+
 def is_placeholder_gateway(value: str) -> bool:
     """True when the value is the example host rather than a real gateway.
 
@@ -259,10 +283,11 @@ class ExnessProvider(BrokerProvider):
             label="WebSocket URL",
             placeholder="wss://<ws-host-from-key-management>",
             help=(
-                "Market data is stream-only. Override if the DNS widget gives "
-                "you a different realtime host."
+                "Required. Market data is stream-only — without this there is "
+                "no live price at all. The wss:// host shown next to the "
+                "Gateway in the Key Management DNS widget."
             ),
-            required=False,
+            required=True,
         ),
     )
 
@@ -272,7 +297,12 @@ class ExnessProvider(BrokerProvider):
     def validate(self, creds: Dict[str, Any]) -> Optional[str]:
         missing = self.missing_fields(creds)
         if missing:
-            return f"Missing {', '.join(missing)}."
+            text = f"Missing {', '.join(missing)}."
+            # No REST quote endpoint and no public default, so a bare field
+            # name is not enough to act on — say where the value comes from.
+            if "WebSocket URL" in text:
+                text = f"{text} {WS_URL_HINT}"
+            return text
         account_id = str(creds.get("account_id") or "").strip()
         if not _ACCOUNT_ID.match(account_id) or int(account_id) > 2 ** 64 - 1:
             return "Account ID must be a positive number."
@@ -281,6 +311,13 @@ class ExnessProvider(BrokerProvider):
         gateway = str(creds.get("gateway") or "").strip()
         if gateway and is_placeholder_gateway(gateway):
             return f"Gateway URL is still the example value. {GATEWAY_HINT}"
+        # Same trap, and a worse one: with no REST quote endpoint, an empty or
+        # example WebSocket host is not a degraded feed, it is no feed — and
+        # the resulting failure is a name resolution error that reads like a
+        # network fault rather than a missing setting.
+        ws_url = str(creds.get("ws_url") or "").strip()
+        if is_placeholder_ws(ws_url):
+            return f"WebSocket URL is still the example value. {WS_URL_HINT}"
         try:
             load_signing_key(str(creds.get("private_key") or ""))
         except ExnessError as exc:
@@ -507,7 +544,14 @@ class ExnessProvider(BrokerProvider):
         try:
             ticks = self._stream_ticks(creds, [symbol], timeout=4.0)
         except Exception as exc:
-            return unavailable(describe_exception(exc), symbol=symbol)
+            # Name the host. A transport failure with no address in it sends
+            # the user looking at their API keys and their network, when the
+            # answer is usually "which host did we actually dial?"
+            host = str(creds.get("ws_url") or "").strip() or "(none stored)"
+            detail = describe_exception(exc)
+            if host not in detail:
+                detail = f"{detail} — connecting to {host}"
+            return unavailable(detail, symbol=symbol)
 
         tick = ticks.get(symbol)
         if not tick:
@@ -645,7 +689,13 @@ class ExnessProvider(BrokerProvider):
                 "data cannot be streamed. Install it to enable live quotes."
             ) from exc
 
-        ws_url = str(creds.get("ws_url") or "").strip() or DEFAULT_WS_URL
+        ws_url = str(creds.get("ws_url") or "").strip()
+        if not ws_url or is_placeholder_ws(ws_url):
+            # Refuse to dial a host nobody issued. Falling back to the example
+            # produced a name-resolution failure on a host that does not exist,
+            # reported as "Device or resource busy" — indistinguishable from a
+            # network fault, and unfixable by retrying.
+            raise ExnessError(f"No WebSocket URL is stored. {WS_URL_HINT}")
         account_id = str(creds.get("account_id") or "").strip()
         path = f"/v1/ticks/accounts/{account_id}/ws/ticks"
         headers = sign_headers(
@@ -687,7 +737,11 @@ class ExnessProvider(BrokerProvider):
                         break
             return found
 
-        return asyncio.run(collect())
+        # This is the call that opens the socket, so it is where a resolver
+        # blip surfaces. Retry it exactly like the REST path — but only for
+        # failures worth retrying: a missing WebSocket URL is refused above,
+        # before anything is dialled.
+        return retry_transient(lambda: asyncio.run(collect()))
 
 
 def _num(value: Any) -> Optional[float]:

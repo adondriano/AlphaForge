@@ -100,6 +100,16 @@ and then immediately tries a live call. You get one of three answers:
    > showed `https://gateway.exness.com`, which is not a real gateway; it was
    > copied verbatim and failed with an opaque connection error. If you see
    > "Gateway URL is still the example value", you have pasted a placeholder.
+5. Copy the **WebSocket URL** from the same DNS widget — the `wss://` host,
+   usually listed next to the Gateway. This field is **required** too.
+
+   > **There is no REST quote endpoint.** Exness streams market data over
+   > WebSocket only, so without this host AlphaForge cannot show a live price
+   > at all. `wss://ws.api.exness.com` is an example and will never connect;
+   > leaving the field blank used to dial it, which failed as
+   > `OSError: [Errno 16] Device or resource busy` — a name-resolution error
+   > that looks like a network fault. The engine now refuses to dial a host
+   > nobody issued and tells you to supply one instead.
 
 > The private key is shown **once**. If you lose it, generate a new key pair —
 > it cannot be recovered.
@@ -223,7 +233,8 @@ and the order is **halted**, not paper-filled.
 | **"Could not reach the gateway (…)"** | The host in the Gateway URL could not be connected to. Almost always a placeholder or a typo, not a problem with your API key |
 | Saved but never connects (Exness) | Wrong Gateway URL, or the account is a standard MT5 account rather than an Exness Terminal account |
 | Saved but never connects (OANDA) | Wrong environment. Blank = practice, `live` = real money |
-| Exness live price never appears | Market data is stream-only. The `websockets` package must be installed and the WebSocket URL must be correct |
+| Exness live price never appears | Market data is stream-only and there is no REST quote endpoint. The **WebSocket URL** is required, not optional, and there is no public default — copy the `wss://` host from the DNS widget in Exness → Key Management, next to the Gateway. The `websockets` package must also be installed on the engine |
+| **`OSError: [Errno 16] Device or resource busy`** | Almost always a hostname that does not exist, not a network fault: an empty or example WebSocket URL, or a placeholder Gateway. The engine refuses to dial those now and says so instead. If it names a real host, it is a transient resolver failure and is retried automatically |
 | "No tick arrived for X" | The symbol is not tradeable on that account, or the broker is closed |
 | Orders return `settled: false` | Exness and cTrader acknowledge first and settle asynchronously. Check the broker's own app for the fill |
 | Candles empty on Exness | Exness candle history is stream-only and that subscription is not verified in this build. Backtests use AlphaForge's own data |
