@@ -207,6 +207,59 @@ def _base_url(value: str) -> str:
     return f"https://{parts.netloc}"
 
 
+def _market_closed_note(now: Any = None) -> str:
+    """Explain the weekend, when there is no price to stream.
+
+    ``now`` is injectable so the boundary cases are testable without
+    monkeypatching the clock.
+
+    FX and metals are closed from Friday evening to Sunday evening UTC, so a
+    perfectly healthy connection legitimately delivers nothing for two days a
+    week. Without this the symptom is identical to a rejected subscription, and
+    the user spends the weekend debugging a working integration.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    if now is None:
+        now = datetime.now(timezone.utc)
+    year = now.year
+    # US daylight saving — 2nd Sunday in March to 1st Sunday in November.
+    # While it is in force the trading week opens and closes an hour earlier
+    # in UTC. Approximate by design; brokers differ by a few minutes either way.
+    mar = datetime(year, 3, 1, tzinfo=timezone.utc)
+    dst_start = mar + timedelta(days=(6 - mar.weekday()) % 7 + 7)
+    nov = datetime(year, 11, 1, tzinfo=timezone.utc)
+    dst_end = nov + timedelta(days=(6 - nov.weekday()) % 7)
+    dst = dst_start <= now < dst_end
+
+    open_hour = 21 if dst else 22    # Sunday, UTC
+    close_hour = 20 if dst else 21   # Friday, UTC
+
+    weekday = now.weekday()          # Monday = 0 … Sunday = 6
+    closed = (
+        (weekday == 4 and now.hour >= close_hour)
+        or weekday == 5
+        or (weekday == 6 and now.hour < open_hour)
+    )
+    if not closed:
+        return ""
+
+    if weekday == 6:
+        opens = now.replace(hour=open_hour, minute=0, second=0, microsecond=0)
+    else:
+        # Days until Sunday. Friday is 2, Saturday is 1; weekdays never reach
+        # this branch because the market is open.
+        ahead = (6 - weekday) % 7
+        opens = (now + timedelta(days=ahead)).replace(
+            hour=open_hour, minute=0, second=0, microsecond=0
+        )
+    hours = (opens - now).total_seconds() / 3600.0
+    return (
+        f"The market is closed for the weekend: it reopens at "
+        f"{opens.strftime('%a %H:%M')} UTC, about {hours:.1f}h from now."
+    )
+
+
 def _to_ws_url(base_url: str) -> str:
     """The Access Point is an https:// URL; the stream is the same host over wss."""
     value = (base_url or "").strip()
@@ -550,8 +603,12 @@ class ExnessProvider(BrokerProvider):
         if warning:
             return unavailable(warning[0], symbol=symbol)
 
+        stream_timeout = 6.0
+        notes: List[str] = []
         try:
-            ticks = self._stream_ticks(creds, [symbol], timeout=4.0)
+            ticks = self._stream_ticks(
+                creds, [symbol], timeout=stream_timeout, notes=notes
+            )
         except Exception as exc:
             # Name the host. A transport failure with no address in it sends
             # the user looking at their API keys and their network, when the
@@ -564,11 +621,28 @@ class ExnessProvider(BrokerProvider):
 
         tick = ticks.get(symbol)
         if not tick:
-            return unavailable(
-                f"No tick arrived for {symbol}. Exness streams market data over "
-                "WebSocket only — check the WebSocket URL in the connection settings.",
-                symbol=symbol,
+            # The socket opened and we subscribed, so this is not a connection
+            # problem — the feed just never sent a price for this symbol.
+            weekend = _market_closed_note()
+            detail = (
+                f"The stream connected but sent no price for {symbol} within "
+                f"{stream_timeout:g}s. "
             )
+            if weekend:
+                detail += weekend
+            else:
+                detail += (
+                    "Either the market is closed for this instrument, or it is "
+                    "not tradeable on this account."
+                )
+            if notes:
+                # Whatever the server said instead — including why it refused
+                # the subscription. Without this the same symptom covers a
+                # rejected payload, a dead market and a wrong symbol.
+                detail = f"{detail} The stream replied: {' | '.join(notes)}"
+            else:
+                detail = f"{detail} It sent nothing at all."
+            return unavailable(detail, symbol=symbol)
         bid = float(tick.get("bid") or 0.0)
         ask = float(tick.get("ask") or 0.0)
         digits = int(tick.get("digits") or _digits_for(symbol))
@@ -681,14 +755,24 @@ class ExnessProvider(BrokerProvider):
     # websocket (optional dependency)
     # ------------------------------------------------------------------
     def _stream_ticks(
-        self, creds: Dict[str, Any], symbols: List[str], timeout: float = 4.0
+        self,
+        creds: Dict[str, Any],
+        symbols: List[str],
+        timeout: float = 6.0,
+        notes: Optional[List[str]] = None,
     ) -> Dict[str, Dict[str, Any]]:
         """Open a signed socket, collect the first tick per symbol, close.
 
         ``websockets`` is an optional dependency; when it is missing the caller
         gets a clear reason rather than an ImportError at import time.
+
+        ``notes``, when given, collects what the server actually said. Every
+        message that is not a tick — subscription acks, heartbeats, and above
+        all errors — is dropped on the floor otherwise, which turns a rejected
+        subscription into an unexplained timeout that looks like a slow broker.
         """
         import asyncio
+        import uuid
 
         try:
             import websockets  # type: ignore
@@ -727,6 +811,9 @@ class ExnessProvider(BrokerProvider):
 
         async def collect() -> Dict[str, Dict[str, Any]]:
             found: Dict[str, Dict[str, Any]] = {}
+            seen: List[str] = []
+            if notes is not None:
+                notes.clear()
             deadline = asyncio.get_event_loop().time() + timeout
             async with websockets.connect(  # type: ignore
                 f"{ws_url}{path}",
@@ -735,7 +822,9 @@ class ExnessProvider(BrokerProvider):
                 open_timeout=timeout,
             ) as socket:
                 await socket.send(json.dumps({
-                    "id": "alphaforge-ticks-1",
+                    # Exness documents this as a UUID; a hand-rolled id risks
+                    # the subscription being rejected outright.
+                    "id": str(uuid.uuid4()),
                     "subscribe": {
                         "event": "ticks",
                         "instruments": symbols,
@@ -754,20 +843,26 @@ class ExnessProvider(BrokerProvider):
                     except ValueError:
                         continue
                     # Exness sends the tick flat — {instrument, bid, ask,
-                    # timestamp}. A nested "tick" is accepted too so a change
-                    # of shape degrades into a clear "no tick arrived" rather
-                    # than a parse error.
-                    tick = payload.get("tick") or payload
+                    # timestamp}. A nested "tick" or "data" wrapper is accepted
+                    # too, so a change of shape degrades into a clear "no tick
+                    # arrived" rather than a parse error.
+                    tick = payload.get("tick") or payload.get("data") or payload
                     if not isinstance(tick, dict):
                         continue
                     name = str(tick.get("instrument") or tick.get("symbol") or "").upper()
                     if tick.get("bid") is None or tick.get("ask") is None:
-                        # Subscription acks and heartbeats look like ticks.
+                        # Not a tick. Keep it: this is where a rejected
+                        # subscription reports why, and it is the only place
+                        # the reason is ever visible.
+                        if notes is not None and len(seen) < 4:
+                            seen.append(message[:300])
                         continue
                     if name in {s.upper() for s in symbols} and name not in found:
                         found[name] = tick
                     if len(found) == len(symbols):
                         break
+            if notes is not None:
+                notes.extend(seen)
             return found
 
         # This is the call that opens the socket, so it is where a resolver

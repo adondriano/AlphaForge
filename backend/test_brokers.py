@@ -931,6 +931,7 @@ def test_ticks_follow_the_documented_contract(monkeypatch):
     import json
     import sys
     import types
+    import uuid
 
     import services.brokers.exness as exness
 
@@ -984,10 +985,10 @@ def test_ticks_follow_the_documented_contract(monkeypatch):
         == "wss://ap-abc.exness.com/v1/server-events/accounts/123456/ws/ticks"
     )
     assert captured["subprotocol"] == ["exness-ws-protocol"]
-    assert captured["subscribe"] == {
-        "id": "alphaforge-ticks-1",
-        "subscribe": {"event": "ticks", "instruments": ["XAUUSD"]},
-    }
+    payload = captured["subscribe"]
+    # Exness documents this id as a UUID; a hand-rolled one risks rejection.
+    assert uuid.UUID(payload["id"])
+    assert payload["subscribe"] == {"event": "ticks", "instruments": ["XAUUSD"]}
     assert "XAUUSD" in ticks
 
 
@@ -1007,6 +1008,106 @@ def test_the_example_websocket_host_is_still_refused(monkeypatch):
     with pytest.raises(ExnessError) as excinfo:
         provider._stream_ticks(creds, ["XAUUSD"], timeout=1.0)
     assert "example value" in str(excinfo.value)
+
+
+def test_a_rejected_subscription_reports_what_the_server_said(monkeypatch):
+    """The symptom "no tick arrived" covered a rejected subscription, a closed
+    market and a wrong symbol, and was indistinguishable among them because
+    every non-tick message was discarded. Whatever the server says back must
+    reach the user — it is the only place the reason exists."""
+    import asyncio
+    import json
+    import sys
+    import types
+
+    import services.brokers.exness as exness
+
+    refusal = json.dumps(
+        {"error": {"code": "REQUEST_INVALID", "message": "unknown event: ticks"}}
+    )
+
+    class _Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def send(self, _payload):
+            return None
+
+        async def recv(self):
+            return refusal
+
+    class _Connect:
+        def __init__(self, _url, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return _Socket()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    fake = types.ModuleType("websockets")
+    fake.connect = lambda url, **kwargs: _Connect(url, **kwargs)
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+
+    provider = ExnessProvider()
+    monkeypatch.setattr(
+        provider, "_access_point", lambda creds: "https://ap-abc.exness.com"
+    )
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+
+    notes: list = []
+    ticks = provider._stream_ticks(creds, ["XAUUSD"], timeout=0.5, notes=notes)
+
+    assert ticks == {}
+    assert notes, "the server's refusal must not be thrown away"
+    assert "REQUEST_INVALID" in notes[0]
+
+    # And it has to reach the user, not just the caller.
+    result = provider.price(creds, "XAUUSD")
+    assert result["available"] is False
+    assert "REQUEST_INVALID" in result["reason"]
+    # The old wording blamed a field we now tell the user to leave blank.
+    assert "WebSocket URL" not in result["reason"]
+
+
+def test_the_weekend_is_named_and_the_reopening_is_the_next_sunday():
+    """A closed market and a rejected subscription look identical from the
+    outside: the socket connects, nothing arrives. Saying which day it reopens
+    is the difference between 'it is broken' and 'come back at 22:00 UTC'."""
+    from datetime import datetime, timezone
+
+    from services.brokers.exness import _market_closed_note
+
+    def at(text):
+        return datetime.fromisoformat(text).replace(tzinfo=timezone.utc)
+
+    # Mid-week is open.
+    assert _market_closed_note(at("2026-11-04 12:00:00")) == ""
+    assert _market_closed_note(at("2026-11-06 20:00:00")) == ""
+
+    # Friday 21:00 UTC close, Sunday 22:00 UTC open (northern winter).
+    assert "closed" in _market_closed_note(at("2026-11-06 21:30:00"))
+    assert "closed" in _market_closed_note(at("2026-11-07 12:00:00"))
+    assert "closed" in _market_closed_note(at("2026-11-08 10:00:00"))
+    assert _market_closed_note(at("2026-11-08 23:00:00")) == ""
+
+    # Saturday must reopen the very next day — an earlier version added a
+    # whole week and promised a reopening seven days out.
+    saturday = _market_closed_note(at("2026-11-07 12:00:00"))
+    assert "Sun 22:00 UTC" in saturday
+    assert "34.0h" in saturday
+
+    # During US daylight saving the week opens an hour earlier in UTC.
+    assert "Sun 21:00 UTC" in _market_closed_note(at("2026-07-04 20:30:00"))
 
 
 def test_access_point_urls_become_stream_urls():
