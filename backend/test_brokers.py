@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import base64
 import os
+import socket
 
+import httpx
 import pytest
 
 from services import brokers
@@ -650,6 +652,101 @@ def test_unreachable_supplied_gateway_names_the_host(monkeypatch):
     assert "mine.example.com" in text
     assert "OSError" in text
     assert "no Gateway URL was given" not in text
+
+
+# ---------------------------------------------------------------------------
+# transient network failures
+# ---------------------------------------------------------------------------
+def test_a_busy_resolver_is_transient():
+    """EBUSY out of getaddrinfo is worth an immediate retry.
+
+    It arrives in bursts: a serverless instance resolving several hosts at
+    once gets it, then answers the same name milliseconds later. Treating it
+    as fatal reported a reachable broker as down, over and over, at whatever
+    rate the UI happened to be polling.
+    """
+    from services.brokers.base import is_transient_network_error
+
+    assert is_transient_network_error(OSError(16, "Device or resource busy"))
+    assert is_transient_network_error(
+        socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+    )
+    assert is_transient_network_error(httpx.ConnectError("all connection attempts failed"))
+
+
+def test_a_timeout_is_not_retried():
+    """Retrying a timeout only doubles how long the caller waits for it."""
+    from services.brokers.base import is_transient_network_error
+
+    assert not is_transient_network_error(httpx.ReadTimeout("too slow"))
+    assert not is_transient_network_error(ExnessError("AUTH_INVALID_API_KEY"))
+    assert not is_transient_network_error(OSError(2, "No such file or directory"))
+
+
+def test_retry_transient_recovers_from_a_busy_resolver(monkeypatch):
+    from services.brokers import base
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise httpx.ConnectError("busy")
+        return "ok"
+
+    monkeypatch.setattr(base.time, "sleep", lambda *_: None)
+    assert base.retry_transient(flaky) == "ok"
+    assert len(calls) == 3
+
+
+def test_retry_transient_never_masks_a_real_error(monkeypatch):
+    """A genuine rejection must fail on the first try, unchanged."""
+    from services.brokers import base
+
+    calls = []
+
+    def broken():
+        calls.append(1)
+        raise ExnessError("AUTH_INVALID_SIGNATURE")
+
+    monkeypatch.setattr(base.time, "sleep", lambda *_: None)
+    with pytest.raises(ExnessError):
+        base.retry_transient(broken)
+    assert len(calls) == 1
+
+
+def test_exness_retries_a_busy_resolver(monkeypatch):
+    """The retry has to be wired into the call that actually fails."""
+    import services.brokers.exness as exness
+    from services.brokers import base
+
+    monkeypatch.setattr(base.time, "sleep", lambda *_: None)
+    attempts = {"n": 0}
+
+    class _Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def request(self, *_args, **_kwargs):
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise httpx.ConnectError("busy")
+            return httpx.Response(200, json={"access_point": "https://ap.example.com"})
+
+    monkeypatch.setattr(exness.httpx, "Client", lambda *_a, **_k: _Client())
+
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "retry-1",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mine.example.com",
+    }
+    assert provider._access_point(creds) == "https://ap.example.com"
+    assert attempts["n"] == 3
 
 
 def test_status_reports_the_class_for_unexpected_failures(monkeypatch):

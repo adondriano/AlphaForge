@@ -17,7 +17,16 @@ import type { BrokerCandle, BrokerQuote, BrokerStatus } from "@/lib/types";
 import { useAlphaForge } from "./AlphaForgeProvider";
 import { Spinner } from "./ui";
 
-const POLL_MS = 2000;
+/**
+ * Two seconds looked fine while the calls were being refused. Now that they
+ * reach the broker, each tick is two name lookups on the engine plus two
+ * round trips to a feed that throttles at 100–500 ms — and a serverless
+ * resolver answers a burst like that with EBUSY. Five seconds is fast enough
+ * for a live chart and a fifth of the pressure.
+ */
+const POLL_MS = 5000;
+/** How far a failing feed backs off before giving the resolver a rest. */
+const MAX_POLL_MS = 30_000;
 
 interface Props {
   symbol: string;
@@ -79,18 +88,21 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
   const [changePct, setChangePct] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** Guards against a slow tick piling requests on top of itself. */
   const inFlight = useRef(false);
+  /** Whether a quote has ever landed, so a first-tick blip is not fatal. */
+  const hasQuote = useRef(false);
 
   const connected = Boolean(status?.connected);
   const unavailable = !status || status.mode === "unavailable" || !status.available;
 
   const poll = useCallback(
-    async (initial = false) => {
-      if (!connected || inFlight.current) return;
+    async (initial = false): Promise<boolean> => {
+      if (!connected || inFlight.current) return false;
       inFlight.current = true;
       if (initial) setLoading(true);
+      let ok = false;
       try {
         // The engine reads credentials per account, so price and candle calls
         // are authenticated. Sending them bare made the panel report "the
@@ -102,13 +114,16 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
         ]);
         if (nextQuote.available) {
           setQuote(nextQuote);
+          hasQuote.current = true;
           setError(null);
-        } else if (!nextQuote.available && nextQuote.reason && !quote) {
+          ok = true;
+        } else if (!nextQuote.available && nextQuote.reason && !hasQuote.current) {
           setError(nextQuote.reason);
         }
         if (nextCandles.available) {
           setCandles(nextCandles.candles ?? []);
           setChangePct(nextCandles.change_pct ?? null);
+          ok = true;
         }
       } catch {
         /* keep the last good tick on a transient failure */
@@ -116,8 +131,9 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
         inFlight.current = false;
         if (initial) setLoading(false);
       }
+      return ok;
     },
-    [brokerToken, connected, quote, symbol, timeframe],
+    [brokerToken, connected, symbol, timeframe],
   );
 
   useEffect(() => {
@@ -125,13 +141,24 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
       setQuote(null);
       setCandles([]);
       setChangePct(null);
-      if (timer.current) clearInterval(timer.current);
+      hasQuote.current = false;
+      if (timer.current) clearTimeout(timer.current);
       return;
     }
-    void poll(true);
-    timer.current = setInterval(() => void poll(false), POLL_MS);
+    // Self-scheduling rather than a fixed interval: a feed that keeps failing
+    // backs off instead of hammering the engine's resolver at full rate.
+    let cancelled = false;
+    let delay = POLL_MS;
+    const tick = async (initial: boolean) => {
+      const ok = await poll(initial);
+      if (cancelled) return;
+      delay = ok ? POLL_MS : Math.min(delay * 2, MAX_POLL_MS);
+      timer.current = setTimeout(() => void tick(false), delay);
+    };
+    void tick(true);
     return () => {
-      if (timer.current) clearInterval(timer.current);
+      cancelled = true;
+      if (timer.current) clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connected, symbol, timeframe]);

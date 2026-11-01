@@ -42,6 +42,7 @@ from .base import (
     instrument_class,
     now_iso,
     price_result,
+    retry_transient,
     shadow_fill,
     unavailable,
 )
@@ -359,14 +360,21 @@ class ExnessProvider(BrokerProvider):
         if body is not None:
             headers["Content-Type"] = "application/json"
 
-        # Signed headers must never be replayed at a redirect target.
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = client.request(
-                method.upper(),
-                f"{host}{path_with_query}",
-                headers=headers,
-                content=raw or None,
-            )
+        def _send() -> "httpx.Response":
+            # Signed headers must never be replayed at a redirect target.
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                return client.request(
+                    method.upper(),
+                    f"{host}{path_with_query}",
+                    headers=headers,
+                    content=raw or None,
+                )
+
+        # A serverless resolver hands back EBUSY from getaddrinfo under a burst
+        # of concurrent lookups and then answers the very same name a moment
+        # later. Retrying that is the difference between a working feed and
+        # "Device or resource busy" on a broker that is up.
+        response = retry_transient(_send)
 
         if response.status_code >= 400:
             raise ExnessError(self._error_text(response))

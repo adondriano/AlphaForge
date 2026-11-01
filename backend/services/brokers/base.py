@@ -28,10 +28,14 @@ Rules every provider follows
 
 from __future__ import annotations
 
+import errno
+import socket
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
+
+import httpx
 
 
 def describe_exception(exc: BaseException) -> str:
@@ -63,6 +67,80 @@ TIMEFRAME_CODES: Tuple[str, ...] = (
 MODE_LIVE = "live"
 MODE_SHADOW = "shadow"
 MODE_UNAVAILABLE = "unavailable"
+
+
+#: Errnos that mean "try again", not "this is broken".
+#:
+#: ``EBUSY`` out of ``getaddrinfo`` is the one that started this. On a
+#: serverless instance a burst of concurrent name lookups makes the resolver
+#: hand it back, and the identical call succeeds a moment later. Reporting it
+#: as a hard failure told a user their broker was unreachable when it was
+#: sitting there answering.
+TRANSIENT_ERRNOS = frozenset(
+    value
+    for value in (
+        getattr(errno, name, None)
+        for name in (
+            "EAGAIN",
+            "EBUSY",
+            "EINTR",
+            "ECONNRESET",
+            "ECONNABORTED",
+            "ENETDOWN",
+            "ENETUNREACH",
+            "EHOSTUNREACH",
+            "EADDRNOTAVAIL",
+        )
+    )
+    if value is not None
+) | {getattr(socket, "EAI_AGAIN", -3)}
+
+
+def is_transient_network_error(exc: BaseException) -> bool:
+    """True when a failure is worth an immediate retry.
+
+    A timeout is deliberately *not* transient here: retrying one just holds a
+    request open twice as long, and the caller has usually given up by then.
+    """
+    if isinstance(exc, httpx.TimeoutException):
+        return False
+    if isinstance(exc, httpx.TransportError):
+        return True
+
+    # The errno usually lives on the cause, several frames below the
+    # exception the caller actually sees.
+    current: Optional[BaseException] = exc
+    for _ in range(6):
+        if current is None:
+            break
+        if getattr(current, "errno", None) in TRANSIENT_ERRNOS:
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+T = TypeVar("T")
+
+
+def retry_transient(
+    operation: Callable[[], T],
+    attempts: int = 3,
+    base_delay: float = 0.2,
+) -> T:
+    """Run ``operation``, retrying only failures that are worth retrying.
+
+    Returns the first successful result. Re-raises anything else unchanged on
+    the first try, so a real rejection is never slowed down or masked.
+    """
+    for attempt in range(max(1, attempts)):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001 - re-raised below
+            last = exc
+            if attempt == max(1, attempts) - 1 or not is_transient_network_error(exc):
+                raise
+            time.sleep(base_delay * (2**attempt))
+    raise last  # pragma: no cover - the loop always returns or raises
 
 
 @dataclass(frozen=True)

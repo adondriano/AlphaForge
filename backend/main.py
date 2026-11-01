@@ -49,6 +49,7 @@ try:  # `uvicorn main:app` from inside backend/
     from services import llm as llm_service
     from services.broker_service import brokers_service, invalidate_status_cache
     from services.broker_vault import vault
+    from services.brokers.base import retry_transient
     from services.backtester import generate_bars, run_backtest
     from services.optuna_optimizer import optimize as run_optimizer
     from services.python_analyzer import analyze_strategy
@@ -66,6 +67,7 @@ except ImportError:  # pragma: no cover - imported as part of a package
     from .services import llm as llm_service
     from .services.broker_service import brokers_service, invalidate_status_cache
     from .services.broker_vault import vault
+    from .services.brokers.base import retry_transient
     from .services.backtester import generate_bars, run_backtest
     from .services.optuna_optimizer import optimize as run_optimizer
     from .services.python_analyzer import analyze_strategy
@@ -1353,13 +1355,19 @@ def _resolve_session(request: Request) -> "Tuple[Optional[str], Optional[str]]":
         or ""
     )
     try:
-        response = httpx.get(
-            f"{base}/auth/v1/user",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "apikey": apikey,
-            },
-            timeout=8.0,
+        # Same EBUSY-from-getaddrinfo story as the broker calls: a burst of
+        # concurrent lookups on a serverless instance fails once and succeeds
+        # on the next attempt. Failing outright here reads as "you are not
+        # signed in" to someone who is.
+        response = retry_transient(
+            lambda: httpx.get(
+                f"{base}/auth/v1/user",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "apikey": apikey,
+                },
+                timeout=8.0,
+            )
         )
     except Exception:
         return None, "unreachable"
