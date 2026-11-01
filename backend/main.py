@@ -427,6 +427,22 @@ def _has_optuna() -> bool:
         return False
 
 
+def _streaming_health() -> Dict[str, Any]:
+    """Whether the WebSocket client is importable.
+
+    Exness prices only ever arrive over a stream, so this being false is not a
+    degraded feed, it is no feed — and the resulting error surfaces from a
+    provider as if the broker had refused us. Checkable unauthenticated, so
+    "no live price" can be diagnosed without a token.
+    """
+    try:
+        import websockets  # type: ignore
+
+        return {"websockets": True, "version": getattr(websockets, "__version__", None)}
+    except Exception as exc:
+        return {"websockets": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
 app = FastAPI(
     title="AlphaForge Engine",
     description="AI-Powered Quantitative Strategy Studio & Prop-Firm Execution Engine",
@@ -485,6 +501,10 @@ def health() -> Dict[str, Any]:
                 "providers": brokers.ids(),
                 "vault_enabled": vault.enabled,
                 "vault_error": vault.last_error,
+                # Exness has no REST quote endpoint, so a missing streaming
+                # client is an outage that looks exactly like a broker
+                # rejection. Reported here so it is visible without a token.
+                "streaming": _streaming_health(),
             },
         },
         "risk": {
