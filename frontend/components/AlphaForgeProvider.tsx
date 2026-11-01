@@ -152,6 +152,18 @@ const round = (value: number, digits = 4) => {
 const PAPER_TICK_MS = 5000;
 const PAPER_START_EQUITY = 10_000;
 
+/**
+ * Shown when there is genuinely no session. These are the same words the
+ * engine would have used, produced locally so we never spend a round trip
+ * asking a question we already know the answer to.
+ */
+const SIGNED_OUT_BROKER: BrokerStatus = {
+  ...api.BROKER_UNAVAILABLE,
+  reason: "Sign in to connect a broker.",
+  mode: "unavailable",
+};
+const SIGNED_OUT_CONNECTIONS_REASON = "Sign in to manage broker connections.";
+
 const emptyPaperStats = (strategy: Strategy, running = false): PaperStats => ({
   strategy_id: strategy.id,
   running,
@@ -371,41 +383,92 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
    *  real money, so nothing about them trusts a body parameter. */
   const sessionToken = session?.access_token;
 
-  const refreshBroker = useCallback(async () => {
-    const status = await api.brokerStatus(sessionToken);
-    setBrokerState(status);
-    return status;
+  /**
+   * A Supabase access token that is valid *right now*.
+   *
+   * `session.access_token` is React state, and it can be hours stale. A
+   * machine that sleeps with the tab open keeps whatever token it captured
+   * before the sleep, because nothing re-renders while it is asleep; the
+   * engine then rejects it and reports "Sign in to connect a broker" on a page
+   * that plainly shows the user signed in. `getSession()` refreshes an expired
+   * token before handing it over, so this is always current.
+   *
+   * Falls back to the React-state token when there is no Supabase client.
+   */
+  const freshToken = useCallback(async (): Promise<string | undefined> => {
+    const client = getSupabaseClient();
+    if (!client) return sessionToken;
+    try {
+      const { data } = await client.auth.getSession();
+      return data.session?.access_token ?? sessionToken;
+    } catch {
+      return sessionToken;
+    }
   }, [sessionToken]);
 
+  /**
+   * Force a refresh, for when the engine rejects a token `getSession()` was
+   * still happy with — that combination means the clock drifted, not that the
+   * user signed out.
+   */
+  const forceFreshToken = useCallback(async (): Promise<string | undefined> => {
+    const client = getSupabaseClient();
+    if (!client) return undefined;
+    try {
+      const { data } = await client.auth.refreshSession();
+      return data.session?.access_token || undefined;
+    } catch {
+      return undefined;
+    }
+  }, []);
+
+  const refreshBroker = useCallback(async () => {
+    const token = await freshToken();
+    if (!token) {
+      // Better to say "sign in" than to ask the engine without a token and
+      // have it say "sign in" for us — same words, one less round trip, and
+      // no chance of a slow unauthenticated answer overwriting this.
+      setBrokerState(SIGNED_OUT_BROKER);
+      return SIGNED_OUT_BROKER;
+    }
+    let status = await api.brokerStatus(token);
+    if (status.auth_error) {
+      // The engine could not verify the session. Refresh it once and retry
+      // rather than reporting "sign in" to someone who is already signed in —
+      // an expired token is a recoverable state, not a dead end.
+      const retried = await forceFreshToken();
+      if (retried && retried !== token) status = await api.brokerStatus(retried);
+    }
+    setBrokerState(status);
+    return status;
+  }, [freshToken, forceFreshToken]);
+
   const refreshBrokerConnections = useCallback(async () => {
-    if (!sessionToken) {
+    const token = await freshToken();
+    if (!token) {
       setBrokerConnections([]);
-      setBrokerConnectionsReason("");
+      setBrokerConnectionsReason(SIGNED_OUT_CONNECTIONS_REASON);
       return;
     }
-    let outcome = await api.listBrokerConnections(sessionToken);
-    // An expired token reads as "not signed in" from the engine, and the
-    // browser restores its session asynchronously — so on a page refresh the
-    // first attempt can legitimately fail. Refresh the token once and retry
-    // before accepting an empty list, otherwise a reload silently shows no
-    // connections even though they are all still saved.
-    if ((outcome.connections ?? []).length === 0 && outcome.reason) {
-      const client = getSupabaseClient();
-      const refreshed = client
-        ? await client.auth.refreshSession().then((r) => r.data.session, () => null)
-        : null;
-      const fresh = refreshed?.access_token;
-      if (fresh && fresh !== sessionToken) {
-        outcome = await api.listBrokerConnections(fresh);
-      }
+    let outcome = await api.listBrokerConnections(token);
+    // `auth_error` is the engine saying it could not verify the session. That
+    // is worth exactly one refresh-and-retry: a reload whose token expired
+    // mid-flight would otherwise silently show no connections at all.
+    if (outcome.auth_error) {
+      const retried = await forceFreshToken();
+      if (retried && retried !== token) outcome = await api.listBrokerConnections(retried);
     }
     setBrokerConnections(outcome.connections ?? []);
     setBrokerConnectionsReason(outcome.reason ?? "");
-  }, [sessionToken]);
+  }, [freshToken, forceFreshToken]);
 
   const connectBroker = useCallback(
     async (provider: string, credentials: Record<string, string>, label?: string) => {
-      if (!sessionToken) {
+      // Not `sessionToken`: a token captured hours ago and kept alive by a
+      // sleeping tab is exactly the one the engine will refuse. This is the
+      // moment real credentials are transmitted, so it gets a current one.
+      const token = await freshToken();
+      if (!token) {
         notify({
           kind: "error",
           title: "Sign in to connect a broker",
@@ -415,7 +478,7 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       }
       setBrokerBusy(true);
       try {
-        const outcome = await api.saveBrokerConnection(sessionToken, {
+        const outcome = await api.saveBrokerConnection(token, {
           provider,
           credentials,
           label,
@@ -464,23 +527,24 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
         setBrokerBusy(false);
       }
     },
-    [notify, refreshBrokerConnections, sessionToken, brokerCatalogue],
+    [notify, refreshBrokerConnections, freshToken, brokerCatalogue],
   );
 
   const removeBrokerConnection = useCallback(
     async (connectionId: string) => {
-      if (!sessionToken) return;
+      const token = await freshToken();
+      if (!token) return;
       setBrokerBusy(true);
       try {
-        await api.deleteBrokerConnection(sessionToken, connectionId);
+        await api.deleteBrokerConnection(token, connectionId);
         await refreshBrokerConnections();
-        setBrokerState(await api.brokerStatus(sessionToken));
+        await refreshBroker();
         notify({ kind: "info", title: "Broker connection removed" });
       } finally {
         setBrokerBusy(false);
       }
     },
-    [notify, refreshBrokerConnections, sessionToken],
+    [notify, refreshBrokerConnections, refreshBroker, freshToken],
   );
 
   // Connections are per account, so reload them whenever the user changes.
@@ -513,9 +577,12 @@ export function AlphaForgeProvider({ children }: { children: ReactNode }) {
       }
       await api.pushSettings(next);
       setEngineStatus(await api.refreshEngineStatus());
-      setBrokerState(await api.brokerStatus(sessionToken));
+      // Not `api.brokerStatus(sessionToken)`: saving settings must never be
+      // the thing that rewrites the broker panel to "sign in" just because the
+      // token in state had gone stale.
+      await refreshBroker();
     },
-    [refresh, requireAccount, sessionToken],
+    [refresh, requireAccount, refreshBroker],
   );
 
   /* ------------------------------------------------------------------ */

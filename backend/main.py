@@ -38,7 +38,7 @@ import uuid
 
 import httpx
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -1315,25 +1315,32 @@ SESSION_EXPIRED_DETAIL = (
 )
 
 
-def _user_id_from_request(request: Request) -> Optional[str]:
-    """Verify the caller's Supabase JWT and return their user id.
+def _resolve_session(request: Request) -> "Tuple[Optional[str], Optional[str]]":
+    """Verify the caller's Supabase JWT.
 
-    Broker credentials move real money, so these endpoints do **not** trust a
-    ``user_id`` in the request body the way the strategy endpoints do. The
-    token is checked against Supabase's own ``/auth/v1/user``, and a failure to
-    verify means "no user", which resolves to no connection.
+    Returns ``(user_id, problem)``. Broker credentials move real money, so
+    these endpoints do **not** trust a ``user_id`` in the request body the way
+    the strategy endpoints do. The token is checked against Supabase's own
+    ``/auth/v1/user``, and a failure to verify means "no user", which resolves
+    to no connection.
+
+    ``problem`` is ``None`` when the session verified, and otherwise one of
+    ``no_token``, ``not_configured``, ``unreachable``, ``rejected:<status>`` or
+    ``rejected:no_id``. Every one of those used to reach the screen as the same
+    "Sign in to connect a broker" on a page that plainly showed the user signed
+    in, which made the real cause unfindable.
     """
     header = request.headers.get("authorization") or ""
     if not header.lower().startswith("bearer "):
-        return None
+        return None, "no_token"
     token = header.split(" ", 1)[1].strip()
     if not token:
-        return None
+        return None, "no_token"
 
     settings = get_settings()
     base = (settings.NEXT_PUBLIC_SUPABASE_URL or "").rstrip("/")
     if not base:
-        return None
+        return None, "not_configured"
 
     # GoTrue needs *some* project key in `apikey`. The anon key is the right
     # one, but if it is not configured on this deployment the service role key
@@ -1355,14 +1362,79 @@ def _user_id_from_request(request: Request) -> Optional[str]:
             timeout=8.0,
         )
     except Exception:
-        return None
+        return None, "unreachable"
     if response.status_code != 200:
-        return None
+        return None, f"rejected:{response.status_code}"
     try:
         value = (response.json() or {}).get("id")
     except ValueError:
-        return None
-    return str(value) if value else None
+        value = None
+    if not value:
+        return None, "rejected:no_id"
+    return str(value), None
+
+
+def _user_id_from_request(request: Request) -> Optional[str]:
+    """The verified user id, or ``None``. See :func:`_resolve_session`."""
+    return _resolve_session(request)[0]
+
+
+#: What each ``problem`` from :func:`_resolve_session` means to the person
+#: reading the screen. Deliberately worded so it can sit next to a broker's
+#: own error without sending anyone to re-check API keys that were never
+#: transmitted — these are session failures, not credential failures.
+SESSION_PROBLEM_TEXT: Dict[str, str] = {
+    "no_token": (
+        "The engine received no session token, so it cannot tell which account "
+        "to load. Sign out and back in, then reload this page."
+    ),
+    "not_configured": (
+        "The engine has no Supabase URL configured, so it cannot verify a "
+        "session. Set NEXT_PUBLIC_SUPABASE_URL on the engine deployment."
+    ),
+    "unreachable": (
+        "The engine could not reach Supabase to verify your session. That is a "
+        "network failure, not a problem with your broker credentials — try again."
+    ),
+    "rejected:no_id": (
+        "Supabase accepted the session token but returned no account for it. "
+        "Sign out and back in."
+    ),
+}
+
+
+def session_problem_text(problem: str) -> str:
+    """Human wording for a ``problem`` code, including ones we do not know yet."""
+    if problem in SESSION_PROBLEM_TEXT:
+        return SESSION_PROBLEM_TEXT[problem]
+    if problem.startswith("rejected:"):
+        status = problem.split(":", 1)[1]
+        if status == "401":
+            return (
+                "Supabase rejected the session token as expired or invalid "
+                "(HTTP 401). Sign out and back in, then reload this page."
+            )
+        return (
+            f"Supabase refused to verify the session token (HTTP {status}). "
+            "Sign out and back in, then reload this page."
+        )
+    return f"The session could not be verified ({problem}). Sign out and back in."
+
+
+def _with_session_problem(
+    result: Dict[str, Any], problem: Optional[str]
+) -> Dict[str, Any]:
+    """Stamp a session failure onto an endpoint's answer.
+
+    ``auth_error`` is machine-readable so the browser knows to refresh the
+    session and try once more; ``reason`` is what the user reads.
+    """
+    if not problem:
+        return result
+    stamped = dict(result)
+    stamped["auth_error"] = problem
+    stamped["reason"] = session_problem_text(problem)
+    return stamped
 
 
 @app.get("/api/brokers")
@@ -1373,18 +1445,24 @@ def list_brokers() -> Dict[str, Any]:
 
 @app.get("/api/broker/connections")
 def list_connections(request: Request) -> Dict[str, Any]:
-    user_id = _user_id_from_request(request)
+    user_id, problem = _resolve_session(request)
     if not user_id:
-        return {"connections": [], "reason": "Sign in to manage broker connections."}
+        return {
+            "connections": [],
+            "reason": session_problem_text(problem or "no_token"),
+            "auth_error": problem or "no_token",
+        }
     return {"connections": vault.list_for(user_id)}
 
 
 @app.post("/api/broker/connections")
 def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[str, Any]:
     """Validate, store encrypted, then report whether it actually works."""
-    user_id = _user_id_from_request(request)
+    user_id, problem = _resolve_session(request)
     if not user_id:
-        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_DETAIL)
+        raise HTTPException(
+            status_code=401, detail=f"{SESSION_EXPIRED_DETAIL} [{problem}]"
+        )
 
     provider = brokers.get(payload.provider)
     if provider is None:
@@ -1418,9 +1496,11 @@ def save_connection(payload: BrokerConnectionRequest, request: Request) -> Dict[
 
 @app.delete("/api/broker/connections/{connection_id}")
 def delete_connection(connection_id: str, request: Request) -> Dict[str, Any]:
-    user_id = _user_id_from_request(request)
+    user_id, problem = _resolve_session(request)
     if not user_id:
-        raise HTTPException(status_code=401, detail=SESSION_EXPIRED_DETAIL)
+        raise HTTPException(
+            status_code=401, detail=f"{SESSION_EXPIRED_DETAIL} [{problem}]"
+        )
     deleted = vault.delete(connection_id, user_id)
     invalidate_status_cache(user_id)
     return {"deleted": deleted}
@@ -1440,8 +1520,9 @@ def broker_status(
     slower than the browser was willing to wait. Pass ``?probe=1`` to ask the
     broker directly.
     """
-    return brokers_service.status(
-        connection_id, _user_id_from_request(request), probe=probe
+    user_id, problem = _resolve_session(request)
+    return _with_session_problem(
+        brokers_service.status(connection_id, user_id, probe=probe), problem
     )
 
 
@@ -1451,7 +1532,10 @@ def broker_price(
     symbol: str = Query("XAUUSD"),
     connection_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return brokers_service.price(symbol, connection_id, _user_id_from_request(request))
+    user_id, problem = _resolve_session(request)
+    return _with_session_problem(
+        brokers_service.price(symbol, connection_id, user_id), problem
+    )
 
 
 @app.get("/api/broker/candles")
@@ -1462,8 +1546,10 @@ def broker_candles(
     count: int = Query(120),
     connection_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return brokers_service.candles(
-        symbol, timeframe.upper(), count, connection_id, _user_id_from_request(request)
+    user_id, problem = _resolve_session(request)
+    return _with_session_problem(
+        brokers_service.candles(symbol, timeframe.upper(), count, connection_id, user_id),
+        problem,
     )
 
 
@@ -1473,7 +1559,10 @@ def broker_symbols(
     needle: str = Query(""),
     connection_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return brokers_service.symbols(needle, connection_id, _user_id_from_request(request))
+    user_id, problem = _resolve_session(request)
+    return _with_session_problem(
+        brokers_service.symbols(needle, connection_id, user_id), problem
+    )
 
 
 @app.post("/api/reset")

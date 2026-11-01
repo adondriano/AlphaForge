@@ -340,6 +340,13 @@ export interface BrokerStatus {
     broker?: string | null;
   } | null;
   environment?: string;
+  /**
+   * Machine-readable reason the engine could not verify the session, e.g.
+   * `no_token`, `unreachable` or `rejected:401`. Present only on failure and
+   * never on a broker error. The browser uses it to refresh the session and
+   * retry instead of showing "sign in" to someone who is already signed in.
+   */
+  auth_error?: string;
 }
 
 export interface BrokerQuote {

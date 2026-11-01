@@ -419,9 +419,7 @@ def test_broker_connections_require_sign_in(client):
 
 def test_saving_a_connection_rejects_unknown_providers(client, monkeypatch):
     """Guards against a typo silently creating a row nobody can route."""
-    from main import _user_id_from_request
-
-    monkeypatch.setattr("main._user_id_from_request", lambda request: "user-1")
+    monkeypatch.setattr("main._resolve_session", lambda request: ("user-1", None))
     response = client.post(
         "/api/broker/connections",
         json={"provider": "not-a-broker", "credentials": {}},
@@ -511,6 +509,86 @@ def test_broker_auth_rejects_unverifiable_token(monkeypatch):
     monkeypatch.setattr(main, "get_settings", lambda: _Settings(anon="a", service="s"))
 
     assert main._user_id_from_request(_Request()) is None
+
+
+def test_every_session_failure_is_named_not_flattened(monkeypatch):
+    """A session failure must say *which* one it was.
+
+    They all used to arrive on screen as "Sign in to connect a broker" on a
+    page that showed the user signed in, which is how a whole evening went
+    into checking credentials that were never transmitted.
+    """
+    import main
+
+    class _Unreachable:
+        @staticmethod
+        def get(*args, **kwargs):
+            raise OSError("no route to host")
+
+    monkeypatch.setattr(main, "get_settings", lambda: _Settings(anon="a", service="s"))
+
+    monkeypatch.setattr(main.httpx, "get", _Unreachable.get)
+    assert main._resolve_session(_Request()) == (None, "unreachable")
+
+    class _Rejected:
+        status_code = 401
+
+        @staticmethod
+        def json():
+            return {"msg": "nope"}
+
+    monkeypatch.setattr(main.httpx, "get", lambda *a, **k: _Rejected())
+    assert main._resolve_session(_Request()) == (None, "rejected:401")
+
+    class _NoId:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {}
+
+    monkeypatch.setattr(main.httpx, "get", lambda *a, **k: _NoId())
+    assert main._resolve_session(_Request()) == (None, "rejected:no_id")
+
+    class _Anonymous:
+        headers = {}
+
+    assert main._resolve_session(_Anonymous()) == (None, "no_token")
+
+
+def test_session_problem_text_names_the_status_code():
+    import main
+
+    wording = main.session_problem_text("rejected:401")
+    assert "401" in wording
+    assert "session token" in wording
+    # An unknown code must still produce something a person can read.
+    assert "rejected:999" not in main.session_problem_text("rejected:999")
+    assert "999" in main.session_problem_text("rejected:999")
+    assert main.session_problem_text("something-new")
+
+
+def test_broker_status_reports_the_session_problem(client):
+    """The status panel must be able to tell the browser what went wrong."""
+    payload = client.get("/api/broker/status").json()
+    assert payload["connected"] is False
+    assert payload["auth_error"] == "no_token"
+    # Not the old catch-all, which told nobody anything.
+    assert payload["reason"] != "Sign in to connect a broker."
+    assert "session token" in payload["reason"]
+
+
+def test_connections_list_reports_the_session_problem(client):
+    payload = client.get("/api/broker/connections").json()
+    assert payload["connections"] == []
+    assert payload["auth_error"] == "no_token"
+    assert payload["reason"]
+
+
+def test_broker_price_reports_the_session_problem(client):
+    payload = client.get("/api/broker/price", params={"symbol": "XAUUSD"}).json()
+    assert payload["available"] is False
+    assert payload["auth_error"] == "no_token"
 
 
 class _Settings:

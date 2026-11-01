@@ -591,13 +591,14 @@ export async function brokerStatus(
 
 export async function listBrokerConnections(
   token: string,
-): Promise<{ connections: BrokerConnection[]; reason?: string }> {
+): Promise<{ connections: BrokerConnection[]; reason?: string; auth_error?: string }> {
   if (!apiUrl()) return { connections: [], reason: BROKER_UNAVAILABLE.reason };
   try {
-    return await getAuth<{ connections: BrokerConnection[]; reason?: string }>(
-      "/api/broker/connections",
-      token,
-    );
+    return await getAuth<{
+      connections: BrokerConnection[];
+      reason?: string;
+      auth_error?: string;
+    }>("/api/broker/connections", token);
   } catch {
     return { connections: [], reason: BROKER_UNAVAILABLE.reason };
   }
