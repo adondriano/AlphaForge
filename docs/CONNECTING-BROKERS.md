@@ -54,8 +54,9 @@ it is the cleanest fit for a hosted deployment.
 > **⚠️ Exness availability.** Exness states the API is only available in certain
 > regions as it rolls out, and only for **Exness Terminal** accounts — a standard
 > MetaTrader account will not work even with correct keys. Log in to your
-> Personal Area and look for an **API / Key Management** page. If it is not
-> there, you are not eligible yet and should use a different broker from the
+> Personal Area and look for an **API** page — labelled **API Management** or
+> **Key Management** depending on the account. If there is no API section at
+> all, you are not eligible yet and should use a different broker from the
 > table.
 
 * * *
@@ -86,30 +87,44 @@ and then immediately tries a live call. You get one of three answers:
 
 1. Sign in to the [Exness Personal Area](https://www.exness.com/) and complete
    full KYC (proof of identity **and** proof of address).
-2. Open the **API** page and create a key with trading access.
+2. Open the **API** section of the Personal Area and create a key with trading
+   access. (Exness's own documentation calls this page **Key Management**; some
+   accounts show it as **API Management** instead. Same page, different label —
+   whichever you see, it is where API keys are created.)
 3. Copy three values:
    - **Account ID** — the numeric Exness Terminal account number
    - **API Key** — starts `exnsk-`
    - **Private Key** — shown once, either 128 hex characters or a PEM block
-4. Copy the **Gateway URL** from the DNS widget in Key Management and paste it
-   into AlphaForge. This field is **required** — Exness issues it per account
-   and there is no public default.
+4. Fill in the **Gateway URL**: `https://api.exness.com`.
+
+   This is the one host Exness publishes publicly. It is used **only** for
+   access-point discovery — AlphaForge asks it "which server handles this
+   account?" once, caches the answer, and sends every subsequent request
+   straight to that server.
 
    > **⚠️ Do not paste the example from the placeholder.** The field shows
-   > `https://<gateway-from-key-management>` as a template. An earlier version
-   > showed `https://gateway.exness.com`, which is not a real gateway; it was
-   > copied verbatim and failed with an opaque connection error. If you see
-   > "Gateway URL is still the example value", you have pasted a placeholder.
-5. Copy the **WebSocket URL** from the same DNS widget — the `wss://` host,
-   usually listed next to the Gateway. This field is **required** too.
+   > `https://<gateway-host>` as a template. An earlier version documented
+   > `https://gateway.exness.com`, which is not a real gateway; it was copied
+   > verbatim and failed with an opaque connection error. If you see "Gateway
+   > URL is still the example value", you have pasted a placeholder.
+5. **Leave the WebSocket URL blank.**
+
+   You do not need it, and you may not be able to find it. Exness's reference
+   material says a "DNS widget" in Key Management displays the Gateway and a
+   WebSocket host, but that widget is not rendered for every account or region —
+   it is entirely normal not to see it.
+
+   AlphaForge does not depend on it. Live prices come from the account's
+   **Access Point**, the same host REST calls use, which AlphaForge discovers
+   from the Gateway and caches. There is no separate realtime host to copy.
 
    > **There is no REST quote endpoint.** Exness streams market data over
-   > WebSocket only, so without this host AlphaForge cannot show a live price
-   > at all. `wss://ws.api.exness.com` is an example and will never connect;
-   > leaving the field blank used to dial it, which failed as
-   > `OSError: [Errno 16] Device or resource busy` — a name-resolution error
-   > that looks like a network fault. The engine now refuses to dial a host
-   > nobody issued and tells you to supply one instead.
+   > WebSocket only, so if discovery fails there is no live price at all — the
+   > panel will say so rather than showing a number. Earlier versions asked for
+   > a WebSocket URL here and dialled a made-up default when it was blank,
+   > which failed as `OSError: [Errno 16] Device or resource busy` — a
+   > name-resolution error that reads like a network fault. That field is now
+   > optional and, unless Exness has told you otherwise, should stay empty.
 
 > The private key is shown **once**. If you lose it, generate a new key pair —
 > it cannot be recovered.
@@ -225,15 +240,15 @@ and the order is **halted**, not paper-filled.
 | "Credential storage is not configured" | The engine needs `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. See §4 |
 | "Could not decrypt stored credentials" | `ALPHAFORGE_CRED_KEY` changed. Re-enter the credentials |
 | **"401 Unauthorized" / "Your session expired"** | The engine could not verify your Supabase token, so the credentials were **never sent** — no broker was contacted. Sign out and back in. If it persists, the engine deployment is missing `NEXT_PUBLIC_SUPABASE_ANON_KEY` (it needs its own copy; it is not shared with the dashboard) |
-| **`Exness 401` with no error code** | Almost always the **Gateway URL**. Exness issues the HTTPS Gateway per account in Key Management's DNS widget — there is no public default, and the placeholder in the form is only an example. Paste the exact value Exness shows |
+| **`Exness 401` with no error code** | Almost always the **Gateway URL**. Use `https://api.exness.com`. Exness also issues a per-account Gateway in its "DNS widget", but that widget is not shown to every account or region — if you cannot find it, the public Gateway above is the one to use. The placeholder in the form is only an example, not a value to paste |
 | **`Exness 401 (1000)`** `AUTH_INVALID_API_KEY` | Exness does not recognise that API key. Re-copy the whole `exnsk-…` value with no stray spaces, confirm it is still active, and confirm eligibility (region-limited, Exness Terminal account only) |
 | **`Exness 401 (1001)`** `AUTH_INVALID_SIGNATURE` | The private key does not belong to that API key. Exness shows the private key **once** — if it was not saved at creation, generate a new key pair and paste both halves in together |
-| **`Exness 401 (1002)`** `AUTH_PERMISSION_DENIED` | The key exists but lacks the trading scope. Recreate it in Key Management with order and position permissions enabled |
-| **"Gateway URL is still the example value"** | You pasted the placeholder. Get the real HTTPS Gateway from the DNS widget in Exness → Key Management |
+| **`Exness 401 (1002)`** `AUTH_PERMISSION_DENIED` | The key exists but lacks the trading scope. Recreate it in the API / Key Management page with order and position permissions enabled |
+| **"Gateway URL is still the example value"** | You pasted the placeholder. Use `https://api.exness.com`, which is the one Gateway Exness publishes publicly |
 | **"Could not reach the gateway (…)"** | The host in the Gateway URL could not be connected to. Almost always a placeholder or a typo, not a problem with your API key |
 | Saved but never connects (Exness) | Wrong Gateway URL, or the account is a standard MT5 account rather than an Exness Terminal account |
 | Saved but never connects (OANDA) | Wrong environment. Blank = practice, `live` = real money |
-| Exness live price never appears | Market data is stream-only and there is no REST quote endpoint. The **WebSocket URL** is required, not optional, and there is no public default — copy the `wss://` host from the DNS widget in Exness → Key Management, next to the Gateway. The `websockets` package must also be installed on the engine |
+| Exness live price never appears | The stream host is discovered, not supplied, so start with the Access Point: the engine asks the Gateway which server handles the account, then opens `wss://<access-point>/v1/server-events/accounts/<id>/ws/ticks`. If discovery fails — wrong Gateway, or the account is not Exness Terminal — there is no host to dial and no price can appear. Check the Gateway URL first, then confirm the `websockets` package is installed on the engine |
 | **`OSError: [Errno 16] Device or resource busy`** | Almost always a hostname that does not exist, not a network fault: an empty or example WebSocket URL, or a placeholder Gateway. The engine refuses to dial those now and says so instead. If it names a real host, it is a transient resolver failure and is retried automatically |
 | "No tick arrived for X" | The symbol is not tradeable on that account, or the broker is closed |
 | Orders return `settled: false` | Exness and cTrader acknowledge first and settle asynchronously. Check the broker's own app for the fill |

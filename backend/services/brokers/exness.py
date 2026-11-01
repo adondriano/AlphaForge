@@ -51,33 +51,32 @@ from .base import (
 EMPTY_BODY_HASH = "47DEQpj8HBSa-_TImW-5JCeuQeRkm5NMpJWZG3hSuFU"
 
 #: Example only — this host is not a real Exness gateway and never connects.
-#: Exness issues the Gateway per account in the DNS widget in Key Management
-#: and there is no public default, so the field can only ever offer a shape to
-#: copy. Because it is displayed as the field's placeholder it has also been
-#: pasted in verbatim, so it is treated as "not supplied" everywhere below.
+#: It exists so the field can offer a shape to copy, and because it is
+#: displayed as the placeholder it has also been pasted in verbatim, so it is
+#: treated as "not supplied" everywhere below.
 DEFAULT_GATEWAY = "https://gateway.exness.com"
 SIGN_VERSION = 1
 
-#: Market-data host. Also an example: if the DNS widget gives you a realtime
-#: host, set it in the WebSocket URL field and this is never used.
-#: Example only. Exness issues the real realtime host per account in the same
-#: DNS widget as the Gateway, and there is no public one. Market data is
-#: stream-only, so unlike the Gateway there is nothing to fall back to when
-#: this is missing but a failed connection to a host that does not exist.
+#: Example only, kept so a pasted example is recognised and refused rather
+#: than dialled. It is never used as a default: the realtime host is the
+#: account's Access Point, derived from whatever discovery returns.
 DEFAULT_WS_URL = "wss://ws.api.exness.com"
 
 WS_URL_HINT = (
-    "Exness streams market data over WebSocket only — there is no REST quote "
-    "endpoint to fall back on. Paste the WebSocket host from the DNS widget in "
-    "Exness → Personal Area → Key Management into the WebSocket URL field. "
-    "wss://ws.api.exness.com is only an example and will never connect."
+    "Market data is stream-only, and AlphaForge normally connects the stream "
+    "to your account's Access Point, discovered from the Gateway — you should "
+    "not need to set this at all. wss://ws.api.exness.com is an example and "
+    "will never connect; leave the field blank unless Exness has told you "
+    "your realtime host is different."
 )
 
 GATEWAY_HINT = (
-    "Exness issues the real Gateway per account in the DNS widget in Key "
-    "Management, and there is no public default — paste that exact value into "
-    "the Gateway URL field. https://gateway.exness.com is only an example and "
-    "will never connect."
+    "The Gateway is only used to look up which server handles your account, "
+    "so use https://api.exness.com — the one Gateway Exness publishes "
+    "publicly. Exness's reference material also describes a per-account "
+    "Gateway shown in a 'DNS widget', but that widget is not rendered for "
+    "every account or region, and the public Gateway works regardless. "
+    "https://gateway.exness.com is only an example and will never connect."
 )
 
 #: What to do about each public auth error, in plain language.
@@ -90,7 +89,8 @@ AUTH_HINTS = {
     1000: (
         "AUTH_INVALID_API_KEY — Exness did not recognise this API key. Check you "
         "copied the whole 'exnsk-…' value with no stray spaces, that it is still "
-        "active in Key Management, and that the account is eligible: the API is "
+        "active in the API / Key Management page, and that the account is "
+        "eligible: the API is "
         "region-limited and needs an Exness Terminal account (a standard "
         "MetaTrader account will not work even with correct keys)."
     ),
@@ -102,7 +102,8 @@ AUTH_HINTS = {
     ),
     1002: (
         "AUTH_PERMISSION_DENIED — the key exists but lacks the trading scope. "
-        "Recreate it in Key Management with order and position permissions "
+        "Recreate it in the API / Key Management page with order and position "
+        "permissions "
         "enabled."
     ),
 }
@@ -206,6 +207,16 @@ def _base_url(value: str) -> str:
     return f"https://{parts.netloc}"
 
 
+def _to_ws_url(base_url: str) -> str:
+    """The Access Point is an https:// URL; the stream is the same host over wss."""
+    value = (base_url or "").strip()
+    if value.startswith("https://"):
+        return "wss://" + value[len("https://") :]
+    if value.startswith("http://"):
+        return "ws://" + value[len("http://") :]
+    return value
+
+
 def is_placeholder_ws(value: str) -> bool:
     """True when the value is the example WebSocket host, not a real one."""
     from urllib.parse import urlsplit
@@ -270,24 +281,25 @@ class ExnessProvider(BrokerProvider):
             # A template rather than a plausible-looking host: the previous
             # placeholder read like a real address and got pasted in, which
             # then failed as an opaque transport error.
-            placeholder="https://<gateway-from-key-management>",
+            placeholder="https://api.exness.com",
             help=(
-                "Required. The HTTPS Gateway shown in the DNS widget in "
-                "Exness → Personal Area → Key Management. It is issued per "
-                "account and there is no public default."
+                "Required. The Gateway AlphaForge asks which server handles "
+                "your account. Use https://api.exness.com — the one Gateway "
+                "Exness publishes publicly, and the right answer even if you "
+                "do not see a 'DNS widget' in your Personal Area."
             ),
             required=True,
         ),
         CredentialField(
             key="ws_url",
-            label="WebSocket URL",
-            placeholder="wss://<ws-host-from-key-management>",
+            label="WebSocket URL (optional)",
+            placeholder="wss://<leave-blank-normally>",
             help=(
-                "Required. Market data is stream-only — without this there is "
-                "no live price at all. The wss:// host shown next to the "
-                "Gateway in the Key Management DNS widget."
+                "Leave blank. AlphaForge connects the stream to your account's "
+                "Access Point, which it discovers automatically. Only set this "
+                "if Exness tells you your realtime host differs."
             ),
-            required=True,
+            required=False,
         ),
     )
 
@@ -297,12 +309,7 @@ class ExnessProvider(BrokerProvider):
     def validate(self, creds: Dict[str, Any]) -> Optional[str]:
         missing = self.missing_fields(creds)
         if missing:
-            text = f"Missing {', '.join(missing)}."
-            # No REST quote endpoint and no public default, so a bare field
-            # name is not enough to act on — say where the value comes from.
-            if "WebSocket URL" in text:
-                text = f"{text} {WS_URL_HINT}"
-            return text
+            return f"Missing {', '.join(missing)}."
         account_id = str(creds.get("account_id") or "").strip()
         if not _ACCOUNT_ID.match(account_id) or int(account_id) > 2 ** 64 - 1:
             return "Account ID must be a positive number."
@@ -477,14 +484,16 @@ class ExnessProvider(BrokerProvider):
             # No parsable code. An empty 401 body usually means we reached the
             # wrong host entirely, not that the key is wrong.
             parts.append(
-                "The Gateway URL is probably wrong. Exness issues a per-account "
-                "HTTPS Gateway in Key Management (DNS widget) and there is no "
-                "public default — paste the exact value shown there."
+                "The Gateway URL is probably wrong. Use https://api.exness.com "
+                "— the one Gateway Exness publishes publicly. Exness also "
+                "issues a per-account Gateway in a 'DNS widget', but that "
+                "widget is not shown to every account or region, so the "
+                "public Gateway is the value to use."
             )
         elif response.status_code == 403:
             parts.append(
                 "The key authenticated but is not allowed to do this. Check its "
-                "scopes in Key Management."
+                "scopes in the API / Key Management page."
             )
         if body and not message:
             parts.append(f"Response: {body}")
@@ -547,7 +556,7 @@ class ExnessProvider(BrokerProvider):
             # Name the host. A transport failure with no address in it sends
             # the user looking at their API keys and their network, when the
             # answer is usually "which host did we actually dial?"
-            host = str(creds.get("ws_url") or "").strip() or "(none stored)"
+            host = str(creds.get("ws_url") or "").strip() or "(discovered Access Point)"
             detail = describe_exception(exc)
             if host not in detail:
                 detail = f"{detail} — connecting to {host}"
@@ -685,19 +694,29 @@ class ExnessProvider(BrokerProvider):
             import websockets  # type: ignore
         except Exception as exc:  # pragma: no cover - depends on install
             raise ExnessError(
-                "The `websockets` package is not installed, so Exness market "
-                "data cannot be streamed. Install it to enable live quotes."
+                "The `websockets` package is missing from the engine, so "
+                "Exness market data cannot be streamed — there is no REST "
+                "quote endpoint to fall back on. Add it to the engine's "
+                "requirements.txt and redeploy; this is a deployment gap, "
+                "not a problem with your API key or Gateway."
             ) from exc
 
-        ws_url = str(creds.get("ws_url") or "").strip()
-        if not ws_url or is_placeholder_ws(ws_url):
+        # The stream host is the account's Access Point, the same one REST
+        # calls go to — discovery already resolved and cached it. Asking the
+        # user for a separate WebSocket URL was wrong: Exness derives it, and
+        # the field sent us looking for a setting that does not exist.
+        supplied = str(creds.get("ws_url") or "").strip()
+        ws_url = supplied or _to_ws_url(self._access_point(creds))
+        if is_placeholder_ws(ws_url):
             # Refuse to dial a host nobody issued. Falling back to the example
             # produced a name-resolution failure on a host that does not exist,
             # reported as "Device or resource busy" — indistinguishable from a
             # network fault, and unfixable by retrying.
-            raise ExnessError(f"No WebSocket URL is stored. {WS_URL_HINT}")
+            raise ExnessError(f"The WebSocket URL is still the example value. {WS_URL_HINT}")
         account_id = str(creds.get("account_id") or "").strip()
-        path = f"/v1/ticks/accounts/{account_id}/ws/ticks"
+        # Documented ticks path. The earlier /v1/ticks/... path was not a real
+        # endpoint, so every connection was rejected regardless of the host.
+        path = f"/v1/server-events/accounts/{account_id}/ws/ticks"
         headers = sign_headers(
             str(creds.get("api_key") or "").strip(),
             self._key(creds),
@@ -716,9 +735,11 @@ class ExnessProvider(BrokerProvider):
                 open_timeout=timeout,
             ) as socket:
                 await socket.send(json.dumps({
-                    "action": "subscribe",
-                    "id": "alphaforge-1",
-                    "instruments": symbols,
+                    "id": "alphaforge-ticks-1",
+                    "subscribe": {
+                        "event": "ticks",
+                        "instruments": symbols,
+                    },
                 }))
                 while asyncio.get_event_loop().time() < deadline:
                     remaining = deadline - asyncio.get_event_loop().time()
@@ -728,9 +749,21 @@ class ExnessProvider(BrokerProvider):
                         message = await asyncio.wait_for(socket.recv(), remaining)
                     except asyncio.TimeoutError:
                         break
-                    payload = json.loads(message)
+                    try:
+                        payload = json.loads(message)
+                    except ValueError:
+                        continue
+                    # Exness sends the tick flat — {instrument, bid, ask,
+                    # timestamp}. A nested "tick" is accepted too so a change
+                    # of shape degrades into a clear "no tick arrived" rather
+                    # than a parse error.
                     tick = payload.get("tick") or payload
+                    if not isinstance(tick, dict):
+                        continue
                     name = str(tick.get("instrument") or tick.get("symbol") or "").upper()
+                    if tick.get("bid") is None or tick.get("ask") is None:
+                        # Subscription acks and heartbeats look like ticks.
+                        continue
                     if name in {s.upper() for s in symbols} and name not in found:
                         found[name] = tick
                     if len(found) == len(symbols):

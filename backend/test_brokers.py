@@ -417,7 +417,9 @@ def test_bare_401_blames_the_gateway_not_the_key():
 
     assert "Exness 401" in text
     assert "Gateway URL" in text
-    assert "no public default" in text
+    # The actionable advice: a host the user can actually type, whether or
+    # not their Personal Area renders the per-account DNS widget.
+    assert "api.exness.com" in text
 
 
 def test_401_with_unparsable_body_still_gives_guidance():
@@ -458,7 +460,7 @@ def test_missing_gateway_is_called_out_on_discovery_failure(monkeypatch):
     message = str(excinfo.value)
     assert "Gateway URL" in message
     assert "gateway.exness.com" in message
-    assert "Key Management" in message
+    assert "api.exness.com" in message
 
 
 def test_supplied_gateway_failure_does_not_blame_the_default(monkeypatch):
@@ -801,7 +803,7 @@ def test_placeholder_gateway_is_rejected_before_saving():
     problem = provider.validate(creds)
     assert problem is not None
     assert "example value" in problem
-    assert "Key Management" in problem
+    assert "api.exness.com" in problem
 
 
 def test_placeholder_gateway_is_rejected_with_trailing_slash():
@@ -854,12 +856,34 @@ def test_pasted_placeholder_gets_the_hint_on_connect(monkeypatch):
 
 
 def test_gateway_field_is_required():
-    """There is no working default, so the form must not imply one."""
+    """The Gateway is needed for discovery, so the form must ask for it —
+    but it must offer the public host rather than a made-up template."""
     field = next(f for f in ExnessProvider.fields if f.key == "gateway")
     assert field.required is True
-    placeholder = field.placeholder or ""
-    assert "<" in placeholder               # a template, not a real host
-    assert "gateway.exness.com" not in placeholder
+    # A real, typeable host. A "<template>" placeholder sent users hunting
+    # for a value Exness only shows to some accounts.
+    assert field.placeholder == "https://api.exness.com"
+    assert "gateway.exness.com" not in (field.placeholder or "")
+
+
+def test_the_public_gateway_is_accepted_not_mistaken_for_a_placeholder():
+    """The one host Exness publishes is the value we now recommend, so the
+    example-host guard must not reject it. It differs from the example by a
+    single subdomain, which is exactly the kind of near-miss that guard was
+    written for."""
+    from services.brokers.exness import is_placeholder_gateway
+
+    assert is_placeholder_gateway("https://api.exness.com") is False
+    assert is_placeholder_gateway("https://gateway.exness.com") is True
+
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+    assert provider.validate(creds) is None
 
 
 def test_blanks_are_still_reported_as_missing():
@@ -872,13 +896,12 @@ def test_blanks_are_still_reported_as_missing():
     assert "Gateway URL" in provider.validate(creds)
 
 
-def test_websocket_field_is_required_and_templated():
-    """No REST quote endpoint means no working default for the stream host."""
+def test_websocket_field_is_optional_and_says_so():
+    """The stream host is discovered from the Access Point, so the form must
+    not ask the user for something they have no way of finding."""
     field = next(f for f in ExnessProvider.fields if f.key == "ws_url")
-    assert field.required is True
-    placeholder = field.placeholder or ""
-    assert "<" in placeholder                    # a template, not a real host
-    assert "ws.api.exness.com" not in placeholder
+    assert field.required is False
+    assert "blank" in (field.help or "").lower()
 
 
 def test_example_websocket_url_is_rejected_before_saving():
@@ -895,16 +918,58 @@ def test_example_websocket_url_is_rejected_before_saving():
     assert "WebSocket" in text
 
 
-def test_a_missing_websocket_url_is_refused_not_dialled(monkeypatch):
-    """The bug this fixes: with no ws_url stored the engine dialled the
-    example host, and the lookup failed with an errno that read like a
-    network fault. Nothing may be dialled at all."""
+def test_ticks_follow_the_documented_contract(monkeypatch):
+    """Host, path and subscription payload, exactly as Exness documents them.
+
+    All three were wrong. The host was a hand-entered URL that does not exist
+    in the product (and whose lookup failure read as a network fault); the
+    path was /v1/ticks/... rather than /v1/server-events/...; and the
+    subscription was {action, instruments} rather than the nested
+    {subscribe: {event, instruments}}. Any one of them alone is a dead feed.
+    """
+    import asyncio
+    import json
+    import sys
+    import types
+
+    import services.brokers.exness as exness
+
+    captured = {}
+
+    class _Socket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def send(self, payload):
+            captured["subscribe"] = json.loads(payload)
+
+        async def recv(self):
+            return json.dumps(
+                {"instrument": "XAUUSD", "bid": 1.0, "ask": 1.2, "timestamp": "0"}
+            )
+
+    class _Connect:
+        def __init__(self, url, **kwargs):
+            captured["url"] = url
+            captured["subprotocol"] = kwargs.get("subprotocols")
+
+        async def __aenter__(self):
+            return _Socket()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    fake = types.ModuleType("websockets")
+    fake.connect = lambda url, **kwargs: _Connect(url, **kwargs)
+    monkeypatch.setitem(sys.modules, "websockets", fake)
+
     provider = ExnessProvider()
-
-    def explode(*_args, **_kwargs):
-        raise AssertionError("the example host must never be connected to")
-
-    monkeypatch.setattr(provider, "_stream_ticks", explode)
+    monkeypatch.setattr(
+        provider, "_access_point", lambda creds: "https://ap-abc.exness.com"
+    )
 
     creds = {
         "account_id": "123456",
@@ -912,14 +977,43 @@ def test_a_missing_websocket_url_is_refused_not_dialled(monkeypatch):
         "private_key": VECTOR_KEY_HEX,
         "gateway": "https://mt-gateway.example.com",
     }
-    result = provider.price(creds, "XAUUSD")
+    ticks = provider._stream_ticks(creds, ["XAUUSD"], timeout=1.0)
 
-    assert result["available"] is False
-    reason = result["reason"]
-    assert "WebSocket URL" in reason
-    assert "Key Management" in reason
-    # Not the errno that sent us looking at the network instead.
-    assert "Device or resource busy" not in reason
+    assert (
+        captured["url"]
+        == "wss://ap-abc.exness.com/v1/server-events/accounts/123456/ws/ticks"
+    )
+    assert captured["subprotocol"] == ["exness-ws-protocol"]
+    assert captured["subscribe"] == {
+        "id": "alphaforge-ticks-1",
+        "subscribe": {"event": "ticks", "instruments": ["XAUUSD"]},
+    }
+    assert "XAUUSD" in ticks
+
+
+def test_the_example_websocket_host_is_still_refused(monkeypatch):
+    """An explicitly pasted example must not be dialled either."""
+    provider = ExnessProvider()
+    monkeypatch.setattr(
+        provider, "_access_point", lambda creds: "https://ap-abc.exness.com"
+    )
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://mt-gateway.example.com",
+        "ws_url": "wss://ws.api.exness.com",
+    }
+    with pytest.raises(ExnessError) as excinfo:
+        provider._stream_ticks(creds, ["XAUUSD"], timeout=1.0)
+    assert "example value" in str(excinfo.value)
+
+
+def test_access_point_urls_become_stream_urls():
+    from services.brokers.exness import _to_ws_url
+
+    assert _to_ws_url("https://ap-abc.exness.com") == "wss://ap-abc.exness.com"
+    assert _to_ws_url("http://localhost:8080") == "ws://localhost:8080"
 
 
 def test_a_stream_failure_names_the_host_it_dialled(monkeypatch):

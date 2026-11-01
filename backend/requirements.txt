@@ -11,3 +11,7 @@ httpx==0.27.2
 supabase==2.7.4
 # Ed25519 request signing (Exness) + AES-GCM credential encryption
 cryptography>=43.0.0,<47.0.0
+# Exness streams market data over WebSocket — there is no REST quote
+# endpoint. Undeclared, this import fails on a fresh deploy and every live
+# quote dies with a missing-package error that looks like a broker fault.
+websockets>=13.0,<16.0
