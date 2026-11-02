@@ -26,6 +26,7 @@ from .base import (
     now_iso,
     price_result,
     shadow_fill,
+    to_epoch_seconds,
     unavailable,
 )
 
@@ -339,14 +340,11 @@ def _num(value: Any) -> Optional[float]:
 
 
 def _epoch(value: Any) -> int:
-    """OANDA returns RFC3339 with nanoseconds; keep whole seconds."""
-    text = str(value or "")
-    if not text:
-        return 0
-    try:
-        from datetime import datetime
+    """OANDA returns RFC3339 with nanoseconds; keep whole seconds.
 
-        head = text.split(".")[0].replace("Z", "")
-        return int(datetime.strptime(head, "%Y-%m-%dT%H:%M:%S").timestamp())
-    except Exception:
-        return 0
+    Delegates to the shared converter, which reads the offset as UTC. The
+    previous implementation used ``datetime.timestamp()`` on a naive value,
+    which silently shifts every candle by whatever timezone the server happens
+    to be running in.
+    """
+    return to_epoch_seconds(value)

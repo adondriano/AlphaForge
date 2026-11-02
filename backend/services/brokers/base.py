@@ -29,6 +29,7 @@ Rules every provider follows
 from __future__ import annotations
 
 import errno
+import re
 import socket
 import time
 import traceback
@@ -211,6 +212,71 @@ def instrument_class(symbol: str) -> str:
 # ---------------------------------------------------------------------------
 def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+_FRACTION = re.compile(r"\.(\d+)")
+
+
+def to_epoch_seconds(value: Any) -> int:
+    """Coerce whatever a broker calls a timestamp into whole seconds.
+
+    Brokers disagree on the shape: OANDA sends RFC3339 with nanoseconds,
+    Exness sends ISO 8601 with milliseconds, others send an epoch integer that
+    may be seconds, milliseconds or microseconds. Callers used to assume one
+    shape and raise on the rest — an ISO string passed to ``int()`` took the
+    whole price endpoint down over what is only a display field.
+
+    Returns 0 when the value cannot be read. A wrong timestamp is cosmetic; a
+    raised exception is not.
+    """
+    if value is None or isinstance(value, bool):
+        return 0
+
+    # Numeric epoch — divide down until it is plausibly seconds. This covers
+    # milliseconds (1.7e12) and microseconds (1.7e15) without guessing which.
+    if isinstance(value, (int, float)):
+        number = float(value)
+        for _ in range(3):
+            if abs(number) <= 1e11:
+                break
+            number /= 1000.0
+        return int(number)
+
+    text = str(value).strip()
+    if not text:
+        return 0
+
+    try:
+        number = float(text)
+    except ValueError:
+        pass  # not numeric — fall through to the ISO 8601 parse
+    else:
+        return to_epoch_seconds(number)
+
+    try:
+        from datetime import datetime, timezone
+
+        iso = text
+        if iso[-1:] in ("Z", "z"):
+            iso = iso[:-1] + "+00:00"
+        # fromisoformat before 3.11 accepts only 3 or 6 fractional digits, and
+        # brokers send anywhere from 3 to 9.
+        match = _FRACTION.search(iso)
+        if match:
+            iso = (
+                iso[: match.start()]
+                + "."
+                + (match.group(1) + "000000")[:6]
+                + iso[match.end() :]
+            )
+        stamp = datetime.fromisoformat(iso)
+    except Exception:
+        return 0
+    # Naive stamps are UTC; assuming the server's local zone would skew every
+    # candle by the deployment's offset.
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return int(stamp.timestamp())
 
 
 def unavailable(reason: str, **extra: Any) -> Dict[str, Any]:

@@ -44,6 +44,7 @@ from .base import (
     price_result,
     retry_transient,
     shadow_fill,
+    to_epoch_seconds,
     unavailable,
 )
 
@@ -643,11 +644,36 @@ class ExnessProvider(BrokerProvider):
             else:
                 detail = f"{detail} It sent nothing at all."
             return unavailable(detail, symbol=symbol)
-        bid = float(tick.get("bid") or 0.0)
-        ask = float(tick.get("ask") or 0.0)
-        digits = int(tick.get("digits") or _digits_for(symbol))
-        return price_result(symbol, bid, ask, digits, last=ask,
-                            when=int(tick.get("timestamp") or 0), via="exness-ws")
+        # Parsing lives outside the socket call, so an unexpected field used to
+        # escape as a 500 and take the endpoint down — an ISO timestamp handed
+        # to int() did exactly that. The contract is that providers never
+        # raise, so a malformed tick is reported, not thrown.
+        try:
+            bid = float(tick["bid"])
+            ask = float(tick["ask"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return unavailable(
+                f"The tick for {symbol} had no usable bid/ask ({exc}): "
+                f"{json.dumps(tick)[:200]}",
+                symbol=symbol,
+            )
+        if bid <= 0 or ask <= 0:
+            # A zero here would render as a real price of 0.00000, which is
+            # worse than showing nothing at all.
+            return unavailable(
+                f"The tick for {symbol} carried a non-positive price "
+                f"(bid={bid}, ask={ask}): {json.dumps(tick)[:200]}",
+                symbol=symbol,
+            )
+        try:
+            digits = int(tick.get("digits") or _digits_for(symbol))
+        except (TypeError, ValueError):
+            digits = _digits_for(symbol)
+        # Exness sends ISO 8601 ("2026-11-02T16:12:06.814Z"), not an epoch.
+        return price_result(
+            symbol, bid, ask, digits, last=ask,
+            when=to_epoch_seconds(tick.get("timestamp")), via="exness-ws",
+        )
 
     def candles(
         self,

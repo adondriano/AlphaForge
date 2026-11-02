@@ -1079,6 +1079,86 @@ def test_a_rejected_subscription_reports_what_the_server_said(monkeypatch):
     assert "WebSocket URL" not in result["reason"]
 
 
+def test_iso_timestamps_do_not_crash_the_price_endpoint():
+    """Exness sends '2026-11-02T16:12:06.814Z'. It was handed straight to
+    int(), which raised out of price() — a 500 over a display field, on the
+    first tick that ever arrived. Parsing must be total: it either yields
+    seconds or zero."""
+    from services.brokers.base import to_epoch_seconds
+
+    crashed = "2026-11-02T16:12:06.814Z"
+    assert isinstance(to_epoch_seconds(crashed), int)
+    # Round-trips back to the same instant.
+    import time
+
+    assert time.strftime(
+        "%Y-%m-%dT%H:%M:%S", time.gmtime(to_epoch_seconds(crashed))
+    ) == "2026-11-02T16:12:06"
+
+    # Every other shape a broker might send, all ending in whole seconds.
+    assert to_epoch_seconds("2026-11-02T16:12:06Z") > 0
+    assert to_epoch_seconds("2026-11-02T16:12:06.814123456Z") > 0
+    assert to_epoch_seconds(1762102326) == 1762102326        # seconds
+    assert to_epoch_seconds(1762102326814) == 1762102326     # milliseconds
+    assert to_epoch_seconds(1762102326814000) == 1762102326  # microseconds
+    assert to_epoch_seconds("1762102326") == 1762102326
+
+    # Unreadable is 0, never an exception.
+    for bad in (None, "", "garbage", True, {}, []):
+        assert to_epoch_seconds(bad) == 0
+
+
+def test_a_tick_with_an_iso_timestamp_still_produces_a_price(monkeypatch):
+    """End to end: the tick shape that broke the endpoint now returns a quote."""
+    provider = ExnessProvider()
+    monkeypatch.setattr(
+        provider,
+        "_stream_ticks",
+        lambda creds, symbols, timeout=6.0, notes=None: {
+            "XAUUSD": {
+                "instrument": "XAUUSD",
+                "bid": "2775.12",
+                "ask": "2775.42",
+                "timestamp": "2026-11-02T16:12:06.814Z",
+            }
+        },
+    )
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+    result = provider.price(creds, "XAUUSD")
+    assert result["available"] is True
+    assert result["bid"] == 2775.12
+    assert result["ask"] == 2775.42
+    assert result["time"] > 0
+
+
+def test_a_tick_missing_or_zero_prices_is_refused_not_rendered(monkeypatch):
+    """A missing bid used to become 0.0 and display as a real price of
+    0.00000. Showing nothing is the only safe answer."""
+    provider = ExnessProvider()
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+
+    for bad in ({"instrument": "XAUUSD", "ask": "1.5"},
+                {"instrument": "XAUUSD", "bid": "0", "ask": "0"},
+                {"instrument": "XAUUSD", "bid": "oops", "ask": "1.5"}):
+        monkeypatch.setattr(
+            provider, "_stream_ticks",
+            lambda creds, symbols, timeout=6.0, notes=None, _b=bad: {"XAUUSD": _b},
+        )
+        result = provider.price(creds, "XAUUSD")
+        assert result["available"] is False, bad
+        assert result["reason"]
+
+
 def test_the_weekend_is_named_and_the_reopening_is_the_next_sunday():
     """A closed market and a rejected subscription look identical from the
     outside: the socket connects, nothing arrives. Saying which day it reopens
