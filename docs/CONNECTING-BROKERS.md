@@ -79,6 +79,12 @@ and then immediately tries a live call. You get one of three answers:
 | `disconnected` | Saved, but the broker rejected them — the reason is shown |
 | `halted` | A connection exists but is broken. **Trading stops** — see §5 |
 
+Where a strategy is open you also get a **candlestick chart** alongside the price.
+It is drawn from the broker's own candle history, and the newest bar is
+re-extended from every live quote so the right edge moves between refreshes.
+Timeframes M1 to W1 are selectable; the chart starts on the strategy's own
+timeframe.
+
 * * *
 
 ## 3. Per-broker credential walkthrough
@@ -253,7 +259,8 @@ and the order is **halted**, not paper-filled.
 | **"No tick arrived for X"** | The socket connected and subscribed, so this is not a connection problem — the feed just never sent a price. In order of likelihood: **the market is closed** (FX and metals run Sunday 22:00 UTC to Friday 21:00 UTC, an hour earlier during US daylight saving — the message tells you when it reopens), the instrument is not tradeable on that account, or the symbol name is wrong. Anything the stream sent back instead of a tick is quoted in the message, which is how a rejected subscription is told apart from a quiet market |
 | **`invalid literal for int() with base 10: '…Z'`** | A tick arrived with an ISO 8601 timestamp and the parser expected an epoch integer. Fixed — timestamps are now read as ISO strings, epoch seconds, milliseconds or microseconds, and an unreadable one becomes 0 instead of an error. If you still see it, the engine is on a build from before this fix |
 | Orders return `settled: false` | Exness and cTrader acknowledge first and settle asynchronously. Check the broker's own app for the fill |
-| Candles empty on Exness | Exness candle history is stream-only and that subscription is not verified in this build. Backtests use AlphaForge's own data |
+| Candles empty on Exness | History is read from `GET /v1/market-data/accounts/{id}/candles`, so an empty chart means Exness had no quotes in the window — usually a market closed throughout it, or an instrument this account cannot trade. `MARKET_NO_QUOTES` and `MARKET_INSTRUMENT_NOT_FOUND` are called out in the reason. Backtests always use AlphaForge's own data, never this feed |
+| Chart is frozen but the price moves | The newest bar is re-extended from each live quote, so it should track. If not, history is failing while the tick stream is healthy — check the reason under the chart |
 
 * * *
 

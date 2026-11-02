@@ -29,7 +29,9 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 import httpx
 
@@ -108,6 +110,20 @@ AUTH_HINTS = {
         "enabled."
     ),
 }
+
+#: Candle timeframes Exness publishes, with their length in seconds. Used to
+#: reject an unsupported timeframe up front and to size the lookback window.
+#: Every timeframe AlphaForge offers (M1 … W1) is in this set, so the request
+#: passes straight through unchanged.
+TIMEFRAME_SECONDS = {
+    "S1": 1, "S5": 5, "S15": 15,
+    "M1": 60, "M3": 180, "M5": 300, "M10": 600, "M15": 900, "M30": 1_800,
+    "H1": 3_600, "H2": 7_200, "H4": 14_400,
+    "D1": 86_400, "W1": 604_800, "MN": 2_592_000,
+}
+
+#: Exness caps candle history per request; asking for more is a hard 400.
+MAX_CANDLES = 500
 
 _HEX_KEY = re.compile(r"^[0-9a-fA-F]{128}$")
 _ACCOUNT_ID = re.compile(r"^[1-9][0-9]*$")
@@ -682,19 +698,96 @@ class ExnessProvider(BrokerProvider):
         timeframe: str = "H1",
         count: int = 120,
     ) -> Dict[str, Any]:
-        """Candles come from the same stream; without history we build nothing.
+        """Candle history from the documented Historical Market Data endpoint.
 
-        Exness publishes candle history through the WebSocket feed. Until that
-        subscription is confirmed against a live account this refuses to
-        fabricate a series — an empty chart beats a chart of invented prices.
+        ``GET /v1/market-data/accounts/{id}/candles`` — see the Exness Trader
+        API reference. This used to refuse outright, on the assumption that
+        history was stream-only; the reference documents a plain signed REST
+        endpoint for it, so the chart was missing only because nobody looked.
         """
-        return unavailable(
-            "Exness candle history is only available over the streaming feed and "
-            "this build has not verified that subscription yet. Live price still "
-            "works; backtests use AlphaForge's own data.",
-            symbol=symbol,
-            timeframe=timeframe,
-            candles=[],
+        problem = self.validate(creds)
+        if problem:
+            return unavailable(problem, symbol=symbol, timeframe=timeframe, candles=[])
+        warning = self.warnings_for(symbol)
+        if warning:
+            return unavailable(warning[0], symbol=symbol, timeframe=timeframe, candles=[])
+
+        tf = (timeframe or "H1").strip().upper()
+        if tf not in TIMEFRAME_SECONDS:
+            return unavailable(
+                f"Exness does not offer a {timeframe} timeframe. Supported: "
+                f"{', '.join(sorted(TIMEFRAME_SECONDS))}.",
+                symbol=symbol,
+                timeframe=timeframe,
+                candles=[],
+            )
+
+        want = int(count or 120)
+        want = max(1, min(want, MAX_CANDLES))
+        account_id = str(creds.get("account_id") or "").strip()
+
+        # Ask for more history than requested so weekends, holidays and thin
+        # stretches still yield a full chart; the tail is trimmed back below.
+        span = TIMEFRAME_SECONDS[tf] * want * 2
+        start = datetime.now(timezone.utc) - timedelta(seconds=span)
+        query = urlencode(
+            {
+                "instrument": symbol.upper(),
+                "price_type": "bid",
+                "timeframe": tf,
+                "from": start.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                "count": want,
+            }
+        )
+        path = f"/v1/market-data/accounts/{account_id}/candles?{query}"
+
+        try:
+            host = self._access_point(creds)
+            data = self._request(creds, "GET", host, path)
+        except Exception as exc:
+            detail = describe_exception(exc)
+            if "MARKET_NO_QUOTES" in detail:
+                detail = (
+                    f"{detail} Exness has no quotes for {symbol} across the whole "
+                    f"requested window — usually a market that has been closed "
+                    f"throughout it, or an instrument this account cannot trade."
+                )
+            elif "MARKET_INSTRUMENT_NOT_FOUND" in detail:
+                detail = f"{detail} Exness does not list {symbol} as an instrument."
+            return unavailable(detail, symbol=symbol, timeframe=timeframe, candles=[])
+
+        series: List[Dict[str, Any]] = []
+        for row in data.get("candles") or []:
+            if not isinstance(row, dict):
+                continue
+            # price_type=bid returns the flat shape; "both" nests it, and a
+            # server-side default change should not empty the chart.
+            ohlc = row.get("bid") or row
+            candle = {
+                "t": to_epoch_seconds(row.get("time")),
+                "o": _num(ohlc.get("open")),
+                "h": _num(ohlc.get("high")),
+                "l": _num(ohlc.get("low")),
+                "c": _num(ohlc.get("close")),
+                "v": float(_num(row.get("volume")) or 0.0),
+            }
+            if None in (candle["o"], candle["h"], candle["l"], candle["c"]):
+                continue
+            series.append(candle)
+
+        if not series:
+            return unavailable(
+                f"Exness returned no candles for {symbol} on {tf}. The market "
+                f"may have been closed for the entire window.",
+                symbol=symbol,
+                timeframe=timeframe,
+                candles=[],
+            )
+
+        series.sort(key=lambda c: c["t"])
+        return candles_result(
+            symbol, timeframe, series[-want:], digits=_digits_for(symbol),
+            via="exness-rest",
         )
 
     def symbols(self, creds: Dict[str, Any], needle: str = "") -> Dict[str, Any]:

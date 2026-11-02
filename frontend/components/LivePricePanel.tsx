@@ -15,6 +15,7 @@ import * as api from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { BrokerCandle, BrokerQuote, BrokerStatus } from "@/lib/types";
 import { useAlphaForge } from "./AlphaForgeProvider";
+import LiveChart from "./LiveChart";
 import { Spinner } from "./ui";
 
 /**
@@ -36,55 +37,16 @@ interface Props {
   compact?: boolean;
 }
 
-function CandleChart({ candles }: { candles: BrokerCandle[] }) {
-  if (candles.length < 2) return null;
-  const W = 320;
-  const H = 88;
-  const highs = candles.map((c) => c.h);
-  const lows = candles.map((c) => c.l);
-  const hi = Math.max(...highs);
-  const lo = Math.min(...lows);
-  const span = hi - lo || 1;
-  const gap = W / candles.length;
-  const barW = Math.max(1.5, gap * 0.62);
-  const y = (v: number) => H - ((v - lo) / span) * (H - 8) - 4;
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="h-20 w-full" role="img" aria-label="Recent candles">
-      {candles.map((candle, i) => {
-        const cx = i * gap + gap / 2;
-        const up = candle.c >= candle.o;
-        const colour = up ? "rgb(52,211,153)" : "rgb(248,113,113)";
-        return (
-          <g key={candle.t}>
-            <line
-              x1={cx}
-              x2={cx}
-              y1={y(candle.h)}
-              y2={y(candle.l)}
-              stroke={colour}
-              strokeOpacity="0.6"
-              strokeWidth="1"
-            />
-            <rect
-              x={cx - barW / 2}
-              y={y(Math.max(candle.o, candle.c))}
-              width={barW}
-              height={Math.max(1.2, Math.abs(y(candle.o) - y(candle.c)))}
-              fill={colour}
-              fillOpacity="0.85"
-            />
-          </g>
-        );
-      })}
-    </svg>
-  );
-}
+/** Timeframes Exness publishes. The strategy's own timeframe leads the list. */
+const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
 
 export default function LivePricePanel({ symbol, timeframe, status, onConnect, compact }: Props) {
   const { brokerToken } = useAlphaForge();
+  /** Starts at the strategy's timeframe; the user can switch the chart only. */
+  const [chartTimeframe, setChartTimeframe] = useState(timeframe);
   const [quote, setQuote] = useState<BrokerQuote | null>(null);
   const [candles, setCandles] = useState<BrokerCandle[]>([]);
+  const [candleError, setCandleError] = useState<string | null>(null);
   const [changePct, setChangePct] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +72,7 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
         const token = await brokerToken();
         const [nextQuote, nextCandles] = await Promise.all([
           api.brokerPrice(symbol, undefined, token),
-          api.brokerCandles(symbol, timeframe, 60, undefined, token),
+          api.brokerCandles(symbol, chartTimeframe, 120, undefined, token),
         ]);
         if (nextQuote.available) {
           setQuote(nextQuote);
@@ -123,7 +85,13 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
         if (nextCandles.available) {
           setCandles(nextCandles.candles ?? []);
           setChangePct(nextCandles.change_pct ?? null);
+          setCandleError(null);
           ok = true;
+        } else if (nextCandles.reason) {
+          // A missing chart must not look like a missing connection: the price
+          // is still live, so say why the bars are absent specifically.
+          setCandleError(nextCandles.reason);
+          setCandles([]);
         }
       } catch {
         /* keep the last good tick on a transient failure */
@@ -133,13 +101,14 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
       }
       return ok;
     },
-    [brokerToken, connected, symbol, timeframe],
+    [brokerToken, connected, symbol, chartTimeframe],
   );
 
   useEffect(() => {
     if (!connected) {
       setQuote(null);
       setCandles([]);
+      setCandleError(null);
       setChangePct(null);
       hasQuote.current = false;
       if (timer.current) clearTimeout(timer.current);
@@ -161,9 +130,12 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
       if (timer.current) clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, symbol, timeframe]);
+  }, [connected, symbol, chartTimeframe]);
 
   /* --------------------------- disconnected state -------------------------- */
+  // Keep following the strategy until someone picks a timeframe by hand.
+  useEffect(() => setChartTimeframe(timeframe), [timeframe]);
+
   if (!connected) {
     const reason =
       status?.reason ??
@@ -191,8 +163,9 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
             </div>
             <p className="mt-1 text-xs leading-relaxed text-white/45">{reason}</p>
             <p className="mt-2 text-[11px] leading-relaxed text-white/30">
-              Run <code className="rounded bg-white/5 px-1 py-0.5">cd backend &amp;&amp; uvicorn main:app --port 8000</code>{" "}
-              on your trading machine, then press <em>Launch &amp; Connect</em> in Settings.
+              AlphaForge connects to your broker&apos;s API directly over HTTPS
+              — there is no bridge agent to run. Add your API credentials in
+              Settings, then press <em>Save &amp; connect</em>.
             </p>
             {onConnect ? (
               <button
@@ -309,8 +282,43 @@ export default function LivePricePanel({ symbol, timeframe, status, onConnect, c
         </p>
       ) : null}
 
-      <div className="mt-3">
-        <CandleChart candles={candles} />
+      <div className="mt-4 border-t border-white/[0.06] pt-3">
+        <div className="mb-2 flex items-center justify-between gap-2">
+          <span className="text-[11px] uppercase tracking-wider text-white/35">
+            {chartTimeframe} candles · {symbol}
+          </span>
+          <div className="flex items-center gap-1">
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                onClick={() => setChartTimeframe(tf)}
+                className={`rounded px-1.5 py-0.5 text-[10px] font-medium transition ${
+                  tf === chartTimeframe
+                    ? "bg-mint-400/15 text-mint-200"
+                    : "text-white/35 hover:bg-white/5 hover:text-white/70"
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {candles.length > 1 ? (
+          <LiveChart
+            candles={candles}
+            timeframe={chartTimeframe}
+            livePrice={mid}
+            digits={digits}
+          />
+        ) : (
+          <div className="flex h-24 items-center justify-center rounded-lg border border-dashed border-white/10 text-center text-[11px] leading-relaxed text-white/30">
+            {candleError
+              ? candleError
+              : "Waiting for candle history…"}
+          </div>
+        )}
       </div>
     </div>
   );

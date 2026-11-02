@@ -1190,6 +1190,123 @@ def test_the_weekend_is_named_and_the_reopening_is_the_next_sunday():
     assert "Sun 21:00 UTC" in _market_closed_note(at("2026-07-04 20:30:00"))
 
 
+def test_candle_history_uses_the_documented_endpoint(monkeypatch):
+    """GET /v1/market-data/accounts/{id}/candles, per the Exness Trader API
+    reference. Candles used to be refused outright on the assumption history
+    was stream-only; the reference documents a signed REST endpoint for it."""
+    provider = ExnessProvider()
+    captured = {}
+
+    def fake_request(creds, method, host, path, body=None, **kwargs):
+        captured["method"] = method
+        captured["host"] = host
+        captured["path"] = path
+        return {
+            "candles": [
+                {
+                    "time": "2026-11-02T15:00:00+00:00",
+                    "open": 2770.1, "high": 2775.0,
+                    "low": 2769.0, "close": 2774.4, "volume": 12,
+                },
+                {
+                    "time": "2026-11-02T16:00:00+00:00",
+                    "open": 2774.4, "high": 2779.0,
+                    "low": 2773.0, "close": 2778.2, "volume": 15,
+                },
+            ]
+        }
+
+    monkeypatch.setattr(provider, "_access_point", lambda creds: "https://ap-abc.exness.com")
+    monkeypatch.setattr(provider, "_request", fake_request)
+
+    creds = {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+    result = provider.candles(creds, "XAUUSD", "H1", 60)
+
+    assert result["available"] is True
+    path = captured["path"]
+    assert path.startswith("/v1/market-data/accounts/123456/candles?")
+    assert "instrument=XAUUSD" in path
+    assert "timeframe=H1" in path
+    assert "price_type=bid" in path
+    assert f"count=60" in path
+    assert "from=" in path
+
+    # A literal "+" in a query string decodes to a space, so the offset has to
+    # be percent-encoded or the timestamp arrives malformed.
+    assert "+" not in path
+    assert "%2B00%3A00" in path
+
+    # ISO 8601 times become epoch seconds, and the series is newest-last.
+    assert [c["t"] for c in result["candles"]] == sorted(
+        c["t"] for c in result["candles"]
+    )
+    assert result["candles"][0]["c"] == 2774.4
+    assert result["change_pct"] > 0
+
+
+def test_candles_accept_the_nested_bid_ask_shape(monkeypatch):
+    """price_type=both nests OHLC under 'bid'/'ask'. A change of default must
+    not silently empty the chart."""
+    provider = ExnessProvider()
+    monkeypatch.setattr(provider, "_access_point", lambda creds: "https://ap-x.exness.com")
+    monkeypatch.setattr(
+        provider,
+        "_request",
+        lambda creds, m, h, p, body=None, **kw: {
+            "candles": [
+                {
+                    "time": "2026-11-02T16:00:00+00:00",
+                    "bid": {"open": 1.0, "high": 1.2, "low": 0.9, "close": 1.1},
+                    "ask": {"open": 1.01, "high": 1.21, "low": 0.91, "close": 1.11},
+                    "volume": 3,
+                }
+            ]
+        },
+    )
+    creds = {"account_id": "1", "api_key": "exnsk-x",
+             "private_key": VECTOR_KEY_HEX, "gateway": "https://api.exness.com"}
+    result = provider.candles(creds, "EURUSD", "M5", 10)
+    assert result["available"] is True
+    # Bid is what we ask for, so bid is what must be charted.
+    assert result["candles"][0]["c"] == 1.1
+
+
+def test_unsupported_and_empty_candle_cases(monkeypatch):
+    """A bad timeframe is refused before any request; an empty series is
+    reported, never padded with invented prices."""
+    provider = ExnessProvider()
+    monkeypatch.setattr(provider, "_access_point", lambda creds: "https://ap-x.exness.com")
+    calls = []
+    monkeypatch.setattr(
+        provider, "_request",
+        lambda creds, m, h, p, body=None, **kw: calls.append(p) or {"candles": []},
+    )
+    creds = {"account_id": "1", "api_key": "exnsk-x",
+             "private_key": VECTOR_KEY_HEX, "gateway": "https://api.exness.com"}
+
+    # Not a timeframe Exness publishes — rejected without dialling.
+    bad = provider.candles(creds, "XAUUSD", "M7", 10)
+    assert bad["available"] is False
+    assert "M7" in bad["reason"]
+    assert calls == []
+
+    # Supported, but the market was shut for the whole window.
+    empty = provider.candles(creds, "XAUUSD", "H1", 10)
+    assert empty["available"] is False
+    assert empty["candles"] == []
+    assert "no candles" in empty["reason"].lower()
+
+    # A count past Exness's cap is clamped rather than earning a 400.
+    calls.clear()
+    provider.candles(creds, "XAUUSD", "H1", 100_000)
+    assert f"count={500}" in calls[0]
+
+
 def test_access_point_urls_become_stream_urls():
     from services.brokers.exness import _to_ws_url
 
