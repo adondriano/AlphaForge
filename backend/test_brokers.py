@@ -1233,7 +1233,8 @@ def test_candle_history_uses_the_documented_endpoint(monkeypatch):
     assert "instrument=XAUUSD" in path
     assert "timeframe=H1" in path
     assert "price_type=bid" in path
-    assert f"count=60" in path
+    # Twice the bars are requested so the tail can be trimmed; 60 -> 120.
+    assert "count=120" in path
     assert "from=" in path
 
     # A literal "+" in a query string decodes to a space, so the offset has to

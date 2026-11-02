@@ -726,9 +726,13 @@ class ExnessProvider(BrokerProvider):
         want = max(1, min(want, MAX_CANDLES))
         account_id = str(creds.get("account_id") or "").strip()
 
-        # Ask for more history than requested so weekends, holidays and thin
-        # stretches still yield a full chart; the tail is trimmed back below.
-        span = TIMEFRAME_SECONDS[tf] * want * 2
+        # Ask for twice the bars across twice the window, so weekends, holidays
+        # and thin stretches still yield a full chart once the tail is trimmed.
+        # `count` walks forward from `from`, so the window and the count have to
+        # grow together — asking for `want` bars over a 2x window would return
+        # the older half and leave the newest bar off the chart entirely.
+        requested = min(want * 2, MAX_CANDLES)
+        span = TIMEFRAME_SECONDS[tf] * requested
         start = datetime.now(timezone.utc) - timedelta(seconds=span)
         query = urlencode(
             {
@@ -736,7 +740,7 @@ class ExnessProvider(BrokerProvider):
                 "price_type": "bid",
                 "timeframe": tf,
                 "from": start.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
-                "count": want,
+                "count": requested,
             }
         )
         path = f"/v1/market-data/accounts/{account_id}/candles?{query}"

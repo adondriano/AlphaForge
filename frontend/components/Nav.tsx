@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  CandlestickChart,
   Flame,
   LogIn,
   LogOut,
@@ -21,6 +22,7 @@ import { cx } from "./ui";
 const LINKS = [
   { href: "/", label: "Command Center", icon: Activity },
   { href: "/studio", label: "Strategy Studio", icon: SlidersHorizontal },
+  { href: "/xauusd", label: "XAUUSD Desk", icon: CandlestickChart },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
