@@ -83,7 +83,7 @@ export default function LiveChart({
   timeframe,
   livePrice,
   digits = 5,
-  height = 300,
+  height = 420,
 }: Props) {
   const [hover, setHover] = useState<Hover | null>(null);
 
@@ -171,8 +171,12 @@ export default function LiveChart({
     <div className="relative">
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        style={{ height }}
+        // Stretch to fill, like EquityChart. The default "meet" letterboxes:
+        // it scales to the smaller axis and centres, so a fixed pixel height
+        // leaves dead bands above and below and the chart reads as shrunk.
+        preserveAspectRatio="none"
+        className="h-auto w-full"
+        style={{ maxHeight: height }}
         role="img"
         aria-label={`${timeframe} candles`}
         onMouseMove={onMove}

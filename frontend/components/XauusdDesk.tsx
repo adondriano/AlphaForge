@@ -454,7 +454,6 @@ export default function XauusdDesk() {
               timeframe={timeframe}
               livePrice={mid}
               digits={digits}
-              height={340}
             />
             <div className="mt-2 border-t border-white/[0.06] pt-2">
               <div className="mb-1 flex items-center gap-2 text-[11px] uppercase tracking-wider text-white/35">

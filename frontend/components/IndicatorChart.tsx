@@ -27,7 +27,7 @@ interface MacdProps {
   height?: number;
 }
 
-export function MacdChart({ histogram, macd, signal, height = 120 }: MacdProps) {
+export function MacdChart({ histogram, macd, signal, height = 150 }: MacdProps) {
   const n = histogram.length;
   if (n < 2) return null;
 
@@ -56,8 +56,9 @@ export function MacdChart({ histogram, macd, signal, height = 120 }: MacdProps) 
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      className="w-full"
-      style={{ height }}
+      preserveAspectRatio="none"
+      className="h-auto w-full"
+      style={{ maxHeight: height }}
       role="img"
       aria-label="MACD"
     >
@@ -109,7 +110,7 @@ interface RsiProps {
   height?: number;
 }
 
-export function RsiChart({ values, oversold, overbought, height = 120 }: RsiProps) {
+export function RsiChart({ values, oversold, overbought, height = 150 }: RsiProps) {
   const n = values.length;
   if (n < 2) return null;
 
@@ -148,8 +149,9 @@ export function RsiChart({ values, oversold, overbought, height = 120 }: RsiProp
   return (
     <svg
       viewBox={`0 0 ${W} ${H}`}
-      className="w-full"
-      style={{ height }}
+      preserveAspectRatio="none"
+      className="h-auto w-full"
+      style={{ maxHeight: height }}
       role="img"
       aria-label="RSI"
     >
