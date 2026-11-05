@@ -874,6 +874,128 @@ class ExnessProvider(BrokerProvider):
             "via": "broker",
         }
 
+    def positions(self, creds: Dict[str, Any]) -> Dict[str, Any]:
+        """Open positions and account state, from the trading snapshot.
+
+        ``GET /v1/trading/accounts/{id}/snapshot`` is the documented way to
+        reconcile open positions, which is what a kill switch has to enumerate
+        before it can close anything. Its response shape is parsed defensively
+        and the raw keys are reported on a mismatch, rather than guessed at —
+        guessing broker response shapes is how this project shipped three
+        invented Exness endpoints.
+        """
+        problem = self.validate(creds)
+        if problem:
+            return {"available": False, "positions": [], "reason": problem}
+
+        account_id = str(creds.get("account_id") or "").strip()
+        try:
+            host = self._access_point(creds)
+            data = self._request(
+                creds, "GET", host, f"/v1/trading/accounts/{account_id}/snapshot"
+            )
+        except Exception as exc:
+            return {"available": False, "positions": [], "reason": describe_exception(exc)}
+
+        if not isinstance(data, dict):
+            return {"available": False, "positions": [], "reason": "Unexpected snapshot shape."}
+
+        # The snapshot may nest the state one level down. Accept either, and
+        # say what we got when neither matches rather than returning silence.
+        container = data
+        for key in ("trading_state_snapshot", "snapshot", "data", "state"):
+            nested = data.get(key)
+            if isinstance(nested, dict) and ("positions" in nested or "account_state" in nested):
+                container = nested
+                break
+
+        rows = container.get("positions")
+        if rows is None:
+            return {
+                "available": False,
+                "positions": [],
+                "reason": (
+                    "The snapshot did not include a positions list, so open "
+                    "positions cannot be enumerated and a mass close would be "
+                    "guessing. Keys returned: "
+                    f"{', '.join(sorted(data)) or '(none)'}"
+                ),
+            }
+
+        positions: List[Dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            positions.append({
+                "position_id": row.get("position_id") or row.get("id"),
+                "instrument": str(row.get("instrument") or "").upper(),
+                "side": str(row.get("side") or "").lower(),
+                "volume": _num(row.get("volume")),
+                "open_price": _num(row.get("open_price") or row.get("price")),
+                "stop_loss_price": _num(row.get("stop_loss_price")),
+                "take_profit_price": _num(row.get("take_profit_price")),
+            })
+
+        account = container.get("account_state") or container.get("account") or {}
+        return {
+            "available": True,
+            "positions": positions,
+            "equity": _num(account.get("equity")),
+            "balance": _num(account.get("balance")),
+            "via": "broker",
+        }
+
+    def close_position(
+        self,
+        creds: Dict[str, Any],
+        position_id: str,
+        volume: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Close one position, fully or partially.
+
+        ``DELETE /v1/trading/accounts/{id}/positions/{position_id}`` — full
+        close when volume is omitted, partial when supplied.
+        """
+        problem = self.validate(creds)
+        if problem:
+            return {
+                "available": False, "closed": False, "position_id": position_id,
+                "reason": problem,
+            }
+
+        body = None
+        if volume is not None:
+            body = {"volume": str(volume)}
+
+        account_id = str(creds.get("account_id") or "").strip()
+        try:
+            host = self._access_point(creds)
+            ack = self._request(
+                creds,
+                "DELETE",
+                host,
+                f"/v1/trading/accounts/{account_id}/positions/{position_id}",
+                body,
+                timeout=15.0,
+            )
+        except Exception as exc:
+            return {
+                "available": False, "closed": False, "position_id": position_id,
+                "reason": describe_exception(exc),
+            }
+
+        return {
+            "available": True,
+            # Exness ACKs and settles asynchronously, so this is "accepted",
+            # not "closed". The final state arrives over server events.
+            "closed": True,
+            "settled": False,
+            "position_id": position_id,
+            "operation_id": ack.get("operation_id"),
+            "note": "Close accepted by Exness; confirmation arrives over server events.",
+            "via": "broker",
+        }
+
     # ------------------------------------------------------------------
     # websocket (optional dependency)
     # ------------------------------------------------------------------

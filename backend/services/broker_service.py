@@ -316,6 +316,63 @@ class BrokerService:
         result.setdefault("provider", provider.id)
         return result
 
+    def positions(
+        self,
+        connection_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            provider, creds, row = self.resolve(connection_id, user_id)
+        except BrokerUnavailable as exc:
+            # No broker configured, so there is genuinely nothing open — every
+            # order this service filled was a paper fill.
+            return {"available": True, "positions": [], "mode": MODE_SHADOW,
+                    "reason": str(exc)}
+
+        try:
+            result = provider.positions(creds)
+        except Exception as exc:
+            return {"available": False, "positions": [], "mode": "halted",
+                    "reason": str(exc)}
+
+        # A broker is configured. If it cannot enumerate positions, saying
+        # "zero open" would let a kill switch report success while exposure
+        # stays on the account, so this is an explicit halt.
+        if not result.get("available"):
+            result["mode"] = "halted"
+        result.setdefault("provider", provider.id)
+        return result
+
+    def close_position(
+        self,
+        position_id: str,
+        volume: Optional[float] = None,
+        connection_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Close one position.
+
+        There is deliberately no paper fallback here. A kill switch that
+        reports "closed" when it closed nothing is worse than one that
+        reports failure.
+        """
+        try:
+            provider, creds, row = self.resolve(connection_id, user_id)
+        except BrokerUnavailable as exc:
+            return {"available": False, "closed": False, "position_id": position_id,
+                    "mode": MODE_SHADOW, "reason": str(exc)}
+
+        try:
+            result = provider.close_position(creds, position_id, volume)
+        except Exception as exc:
+            return {"available": False, "closed": False, "position_id": position_id,
+                    "mode": "halted", "reason": str(exc)}
+
+        if not result.get("closed"):
+            result["mode"] = "halted"
+        result.setdefault("provider", provider.id)
+        return result
+
     # ------------------------------------------------------------------
     def warnings_for(
         self, provider: Any, creds: Dict[str, Any], symbol: str = ""

@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from services import brokers
-from services.broker_service import BrokerService, brokers_service
+from services.broker_service import BrokerService, BrokerUnavailable, brokers_service
 from services.broker_vault import (
     VaultError,
     decrypt_credentials,
@@ -1511,3 +1511,146 @@ def test_probe_is_still_available_when_credentials_change(monkeypatch):
 
     BrokerService().status(None, "u1", probe=True)
     assert _CountingProvider.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# positions / close — the kill switch
+#
+# The invariant these lock down: "the broker could not be enumerated" must
+# never be representable as "nothing is open". A kill switch that reads an
+# empty list and reports success leaves real exposure on a funded account.
+# ---------------------------------------------------------------------------
+
+def _exness_creds():
+    return {
+        "account_id": "123456",
+        "api_key": "exnsk-x",
+        "private_key": VECTOR_KEY_HEX,
+        "gateway": "https://api.exness.com",
+    }
+
+
+def _provider_with(monkeypatch, response):
+    provider = ExnessProvider()
+    captured = {}
+
+    def fake_request(creds, method, host, path, body=None, **kwargs):
+        captured["method"] = method
+        captured["host"] = host
+        captured["path"] = path
+        captured["body"] = body
+        return response
+
+    monkeypatch.setattr(
+        provider, "_access_point", lambda creds: "https://ap-abc.exness.com"
+    )
+    monkeypatch.setattr(provider, "_request", fake_request)
+    return provider, captured
+
+
+def test_positions_reads_the_snapshot_endpoint(monkeypatch):
+    """GET /v1/trading/accounts/{id}/snapshot, per the Exness reference —
+    the documented way to reconcile open positions before closing them."""
+    provider, captured = _provider_with(monkeypatch, {
+        "trading_state_snapshot": {
+            "positions": [{
+                "position_id": "777001",
+                "instrument": "xauusd",
+                "side": "BUY",
+                "volume": 0.02,
+                "open_price": 2770.5,
+                "stop_loss_price": 2760.0,
+            }],
+            "account_state": {"balance": 10000.0, "equity": 9980.5},
+        }
+    })
+
+    result = provider.positions(_exness_creds())
+
+    assert captured["method"] == "GET"
+    assert captured["path"] == "/v1/trading/accounts/123456/snapshot"
+    assert result["available"] is True
+    assert len(result["positions"]) == 1
+    assert result["positions"][0]["position_id"] == "777001"
+    assert result["positions"][0]["instrument"] == "XAUUSD"  # normalised
+    assert result["positions"][0]["side"] == "buy"
+    assert result["equity"] == 9980.5
+
+
+def test_unexpected_snapshot_shape_is_a_halt_not_an_empty_account(monkeypatch):
+    """The snapshot's shape is not published, so it is parsed defensively and
+    a mismatch reports the keys it did return instead of silently yielding
+    zero positions."""
+    provider, _ = _provider_with(monkeypatch, {"something_else": True})
+
+    result = provider.positions(_exness_creds())
+
+    assert result["available"] is False
+    assert result["positions"] == []
+    assert "something_else" in result["reason"], (
+        "the reason should name the keys returned so the shape can be fixed"
+    )
+
+
+def test_full_close_omits_volume_partial_close_sends_it(monkeypatch):
+    """DELETE /v1/trading/accounts/{id}/positions/{id}: no body = full close,
+    volume supplied = partial. Getting this backwards would turn a kill switch
+    into a partial exit."""
+    provider, captured = _provider_with(monkeypatch, {
+        "operation_id": "op-9", "status": "accepted"
+    })
+
+    full = provider.close_position(_exness_creds(), "777001")
+    assert captured["method"] == "DELETE"
+    assert captured["path"] == "/v1/trading/accounts/123456/positions/777001"
+    assert captured["body"] is None, "a full close must not send a volume"
+    assert full["closed"] is True
+    # Exness ACKs first and settles over server events.
+    assert full["settled"] is False
+
+    provider.close_position(_exness_creds(), "777001", volume=0.01)
+    assert captured["body"] == {"volume": "0.01"}
+
+
+def test_service_treats_unenumerable_positions_as_a_halt(monkeypatch):
+    """A configured broker that cannot list positions must surface as halted.
+    Returning an empty list here would let the UI report 'all closed' while
+    positions are still live."""
+    service = BrokerService()
+
+    class Blind:
+        id = "blind"
+        label = "Blind Broker"
+
+        def validate(self, creds):
+            return None
+
+        def status(self, creds):
+            return {"available": True}
+
+    monkeypatch.setattr(
+        service, "resolve", lambda *a, **k: (Blind(), {}, {"id": "conn-1"})
+    )
+
+    result = service.positions()
+
+    assert result["available"] is False
+    assert result["mode"] == "halted"
+    assert result["positions"] == []
+
+
+def test_close_position_has_no_paper_fallback(monkeypatch):
+    """With no broker connected there is nothing to close, and the response
+    must not claim otherwise — a paper 'closed' would be a false all-clear."""
+    service = BrokerService()
+
+    def explode(*a, **k):
+        raise BrokerUnavailable("No broker connection configured.")
+
+    monkeypatch.setattr(service, "resolve", explode)
+
+    result = service.close_position("777001")
+
+    assert result["closed"] is False
+    assert result["mode"] == "shadow"
+    assert "no broker" in result["reason"].lower()

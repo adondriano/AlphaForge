@@ -1593,6 +1593,42 @@ def broker_symbols(
     )
 
 
+@app.get("/api/broker/positions")
+def broker_positions(
+    request: Request,
+    connection_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Open positions, for the kill switch and the exposure panel.
+
+    ``available: false`` means the broker could not be enumerated, which is a
+    halt, not an empty account. The two must never look the same to a caller
+    deciding whether it is safe to stand down.
+    """
+    user_id, problem = _resolve_session(request)
+    return _with_session_problem(
+        brokers_service.positions(connection_id, user_id), problem
+    )
+
+
+class ClosePositionRequest(BaseModel):
+    position_id: str
+    volume: Optional[float] = None
+    connection_id: Optional[str] = None
+
+
+@app.delete("/api/broker/positions/{position_id}")
+def broker_close_position(
+    request: Request, position_id: str, payload: ClosePositionRequest | None = None
+) -> Dict[str, Any]:
+    """Close a position. Omit ``volume`` for a full close."""
+    user_id, problem = _resolve_session(request)
+    body = payload or ClosePositionRequest(position_id=position_id)
+    result = brokers_service.close_position(
+        position_id, body.volume, body.connection_id, user_id
+    )
+    return _with_session_problem(result, problem)
+
+
 @app.post("/api/reset")
 def reset_everything(payload: ResetRequest | None = None) -> Dict[str, Any]:
     """Delete strategies (cascading to optimizations + trade logs)."""

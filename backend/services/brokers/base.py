@@ -449,3 +449,30 @@ class BrokerProvider:
         return shadow_fill(
             order, f"{self.label} has no order routing wired up yet."
         )
+
+    def positions(self, creds: Dict[str, Any]) -> Dict[str, Any]:
+        """Open positions.
+
+        Optional. A provider that cannot enumerate positions cannot support a
+        mass close, and must say so rather than reporting an empty list — an
+        empty list is indistinguishable from "nothing open" and would let a
+        kill switch report success while leaving exposure on the account.
+        """
+        return {
+            "available": False,
+            "positions": [],
+            "reason": f"{self.label} cannot enumerate open positions yet.",
+        }
+
+    def close_position(
+        self,
+        creds: Dict[str, Any],
+        position_id: str,
+        volume: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "available": False,
+            "closed": False,
+            "position_id": position_id,
+            "reason": f"{self.label} cannot close positions yet.",
+        }
