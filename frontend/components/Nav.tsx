@@ -6,6 +6,7 @@ import {
   Activity,
   CandlestickChart,
   Flame,
+  ShieldCheck,
   LogIn,
   LogOut,
   Settings,
@@ -23,6 +24,7 @@ const LINKS = [
   { href: "/", label: "Command Center", icon: Activity },
   { href: "/studio", label: "Strategy Studio", icon: SlidersHorizontal },
   { href: "/xauusd", label: "XAUUSD Desk", icon: CandlestickChart },
+  { href: "/propfirm", label: "Prop Firm", icon: ShieldCheck },
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 

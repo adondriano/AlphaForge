@@ -32,7 +32,9 @@ Run locally::
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import socket
 import time
 import uuid
 
@@ -53,6 +55,7 @@ try:  # `uvicorn main:app` from inside backend/
     from services.backtester import generate_bars, run_backtest
     from services.optuna_optimizer import optimize as run_optimizer
     from services.python_analyzer import analyze_strategy
+    from services import propfirm
     from services.risk import shield_from
     from services.settings import DEFAULT_SETTINGS, Settings, SettingsUpdate, load_settings_from_env
     from services.store import store
@@ -71,6 +74,7 @@ except ImportError:  # pragma: no cover - imported as part of a package
     from .services.backtester import generate_bars, run_backtest
     from .services.optuna_optimizer import optimize as run_optimizer
     from .services.python_analyzer import analyze_strategy
+    from .services import propfirm
     from .services.risk import shield_from
     from .services.settings import DEFAULT_SETTINGS, Settings, SettingsUpdate, load_settings_from_env
     from .services.store import store
@@ -1627,6 +1631,181 @@ def broker_close_position(
         position_id, body.volume, body.connection_id, user_id
     )
     return _with_session_problem(result, problem)
+
+
+# ---------------------------------------------------------------------------
+# prop firm watchlist
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/prop/describe")
+def prop_describe() -> Dict[str, Any]:
+    """Universe, rule presets and default guardrails."""
+    return propfirm.describe()
+
+
+@app.get("/api/prop/watchlist")
+def prop_watchlist(request: Request) -> Dict[str, Any]:
+    """The prop-firm universe annotated with what the broker can actually trade.
+
+    Symbols the broker does not offer are marked unsupported rather than
+    removed: a watchlist that silently hides indices looks like a bug when the
+    user knows the firm offers them, and the whole point is to show where the
+    broker and the firm disagree.
+    """
+    user_id, problem = _resolve_session(request)
+    universe = propfirm.universe()
+
+    listed: Optional[set] = None
+    broker_note = None
+    if not problem:
+        found = brokers_service.symbols(user_id=user_id)
+        if found.get("available"):
+            listed = {str(s).upper() for s in found.get("symbols") or []}
+        else:
+            broker_note = found.get("reason")
+
+    rows = []
+    for row in universe:
+        symbol = row["symbol"]
+        if listed is None:
+            status = "unknown"
+            detail = broker_note or "No broker connected."
+        else:
+            # Brokers suffix instruments (EURUSD.m, EURUSD-ECN). Match on the
+            # base name so a decorated listing still counts as tradable.
+            base = {s.split(".")[0].split("-")[0].split("_")[0].upper() for s in listed}
+            if symbol in listed:
+                status = "tradable"
+                detail = "Offered by the connected broker."
+            elif symbol in base:
+                status = "tradable"
+                detail = "Offered under a broker-specific suffix."
+            else:
+                status = "unsupported"
+                detail = "Not offered by the connected broker."
+        rows.append({**row, "status": status, "status_detail": detail})
+
+    tradable = sum(1 for r in rows if r["status"] == "tradable")
+    unsupported = sum(1 for r in rows if r["status"] == "unsupported")
+    return {
+        "rows": rows,
+        "summary": {
+            "total": len(rows),
+            "tradable": tradable,
+            "unsupported": unsupported,
+            "broker_connected": listed is not None,
+        },
+        "broker_note": broker_note,
+        "session_problem": problem,
+    }
+
+
+# ---------------------------------------------------------------------------
+# alert dispatch
+# ---------------------------------------------------------------------------
+
+
+class AlertDispatchRequest(BaseModel):
+    webhook_url: str
+    webhook_kind: str = "generic"  # generic | discord | telegram
+    chat_id: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+
+
+def _webhook_is_safe(url: str) -> Optional[str]:
+    """Reject anything that would turn this endpoint into an internal probe.
+
+    This fetches a user-supplied URL from inside the network, so without these
+    checks it is a server-side request forgery primitive pointed at cloud
+    metadata services and anything else listening on the private range.
+    """
+    from ipaddress import ip_address, ip_network
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "That is not a URL."
+    if parsed.scheme not in ("http", "https"):
+        return "Only http and https webhook URLs are accepted."
+    if not parsed.hostname:
+        return "That URL has no host."
+
+    blocked = [
+        ip_network("127.0.0.0/8"),
+        ip_network("10.0.0.0/8"),
+        ip_network("172.16.0.0/12"),
+        ip_network("192.168.0.0/16"),
+        ip_network("169.254.0.0/16"),  # includes cloud metadata at 169.254.169.254
+        ip_network("::1/128"),
+        ip_network("fc00::/7"),
+        ip_network("fe80::/10"),
+    ]
+    try:
+        resolved = socket.gethostbyname(parsed.hostname)
+        addr = ip_address(resolved)
+    except Exception:
+        return f"Could not resolve {parsed.hostname}."
+    for net in blocked:
+        if addr in net:
+            return "That webhook points at a private or loopback address."
+    return None
+
+
+@app.post("/api/alerts/dispatch")
+def alerts_dispatch(payload: AlertDispatchRequest) -> Dict[str, Any]:
+    """Forward a signal payload to a webhook.
+
+    Dispatched server-side on purpose: it keeps the webhook URL out of the
+    browser and out of the page source, and it sidesteps the CORS refusal a
+    direct browser call to Discord or Telegram would hit.
+    """
+    problem = _webhook_is_safe(payload.webhook_url)
+    if problem:
+        return {"sent": False, "reason": problem}
+
+    body = payload.payload or {}
+    kind = (payload.webhook_kind or "generic").lower()
+
+    if kind == "discord":
+        symbol = body.get("symbol") or "?"
+        direction = body.get("direction") or "?"
+        confidence = body.get("confidence")
+        levels = body.get("levels") or {}
+        out = {
+            "content": (
+                f"**ALPHA_FORGE_SIGNAL** · {symbol} {str(direction).upper()}"
+                + (f" · confidence {confidence}" if confidence is not None else "")
+            ),
+            "embeds": [{
+                "title": f"{symbol} · {str(direction).upper()}",
+                "fields": [
+                    {"name": "Entry", "value": str(levels.get("entry", "-")), "inline": True},
+                    {"name": "Stop", "value": str(levels.get("sl", "-")), "inline": True},
+                    {"name": "TP1", "value": str(levels.get("tp1", "-")), "inline": True},
+                    {"name": "TP2", "value": str(levels.get("tp2", "-")), "inline": True},
+                ],
+            }],
+        }
+    elif kind == "telegram":
+        out = {"text": json.dumps(body, indent=2)}
+        if payload.chat_id:
+            out["chat_id"] = payload.chat_id
+    else:
+        out = body
+
+    try:
+        resp = httpx.post(payload.webhook_url, json=out, timeout=10.0)
+    except Exception as exc:
+        return {"sent": False, "reason": f"Could not reach the webhook: {exc}"}
+
+    if resp.status_code >= 400:
+        return {
+            "sent": False,
+            "reason": f"Webhook returned {resp.status_code}: {resp.text[:300]}",
+        }
+    return {"sent": True, "status_code": resp.status_code, "kind": kind}
 
 
 @app.post("/api/reset")

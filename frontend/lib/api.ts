@@ -747,3 +747,136 @@ export async function resetEngine(user_id?: string | null): Promise<boolean> {
     return false;
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* prop firm                                                                   */
+/* -------------------------------------------------------------------------- */
+
+export interface PropFirmPreset {
+  id: string;
+  firm: string;
+  program: string;
+  daily_loss_pct: number;
+  max_loss_pct: number;
+  max_loss_type: "static" | "trailing";
+  profit_target_pct: number;
+  min_trading_days: number;
+  daily_reset: string;
+  daily_reset_tz: string;
+  platforms: string[];
+  note: string;
+  source: string;
+}
+
+export interface WatchlistRow {
+  symbol: string;
+  group: string;
+  class: string;
+  pip: number;
+  spread_limit: { pips: number; bps: number; unit: string; source: string };
+  status: "tradable" | "unsupported" | "unknown";
+  status_detail: string;
+}
+
+export interface PropDescribe {
+  universe: WatchlistRow[];
+  firms: PropFirmPreset[];
+  defaults: {
+    daily_loss_pct: number;
+    max_loss_pct: number;
+    fixed_risk_choices: number[];
+  };
+}
+
+export async function propDescribe(): Promise<PropDescribe | null> {
+  if (!apiUrl()) return null;
+  try {
+    return await get<PropDescribe>("/api/prop/describe", 8000);
+  } catch {
+    return null;
+  }
+}
+
+export async function propWatchlist(token?: string): Promise<{
+  rows: WatchlistRow[];
+  summary: { total: number; tradable: number; unsupported: number; broker_connected: boolean };
+  broker_note: string | null;
+} | null> {
+  if (!apiUrl()) return null;
+  try {
+    return token
+      ? await getAuth<never>("/api/prop/watchlist", token, 15000) as never
+      : await get<never>("/api/prop/watchlist", 15000) as never;
+  } catch {
+    return null;
+  }
+}
+
+export async function dispatchAlert(
+  webhookUrl: string,
+  webhookKind: string,
+  payload: Record<string, unknown>,
+  chatId?: string,
+): Promise<{ sent: boolean; reason?: string; status_code?: number }> {
+  if (!apiUrl()) return { sent: false, reason: "No engine configured." };
+  try {
+    return await request<{ sent: boolean; reason?: string; status_code?: number }>(
+      "/api/alerts/dispatch",
+      { webhook_url: webhookUrl, webhook_kind: webhookKind, payload, chat_id: chatId },
+      15000,
+    );
+  } catch (err) {
+    return { sent: false, reason: err instanceof Error ? err.message : "Dispatch failed." };
+  }
+}
+
+export async function brokerPositions(
+  connectionId?: string,
+  token?: string,
+): Promise<{
+  available: boolean;
+  positions: Array<{
+    position_id: string;
+    instrument: string;
+    side: string;
+    volume: number | null;
+    open_price: number | null;
+  }>;
+  mode?: string;
+  reason?: string;
+} | null> {
+  if (!apiUrl()) return null;
+  const query = connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "";
+  try {
+    return token
+      ? await getAuth<never>(`/api/broker/positions${query}`, token, 10000) as never
+      : await get<never>(`/api/broker/positions${query}`, 10000) as never;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Close one position in full.
+ *
+ * There is no volume argument and no paper fallback: this backs a kill switch,
+ * so a partial close or a simulated success would both be the wrong answer to
+ * "flatten the account".
+ */
+export async function closePosition(
+  positionId: string,
+  connectionId?: string,
+  token?: string,
+): Promise<{ closed: boolean; reason?: string; mode?: string; note?: string }> {
+  if (!apiUrl()) return { closed: false, reason: "No engine configured." };
+  const query = connectionId ? `?connection_id=${encodeURIComponent(connectionId)}` : "";
+  try {
+    return await deleteAuth<{ closed: boolean; reason?: string; mode?: string; note?: string }>(
+      `/api/broker/positions/${encodeURIComponent(positionId)}${query}`,
+      token ?? "",
+      15000,
+    );
+  } catch (err) {
+    return { closed: false, reason: err instanceof Error ? err.message : "Close failed." };
+  }
+}
