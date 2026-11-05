@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   BellRing,
   Crosshair,
+  LineChart,
   Loader2,
   Radio,
   Send,
@@ -14,6 +15,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAlphaForge } from "./AlphaForgeProvider";
+import LiveChart from "./LiveChart";
+import { MacdChart, RsiChart } from "./IndicatorChart";
 import {
   Badge,
   Card,
@@ -23,6 +26,7 @@ import {
 } from "./ui";
 import * as api from "@/lib/api";
 import type { PropFirmPreset, WatchlistRow } from "@/lib/api";
+import type { BrokerQuote } from "@/lib/types";
 import {
   DEFAULT_WEIGHTS,
   HEURISTIC_NOTICE,
@@ -31,7 +35,8 @@ import {
   scoreConfidence,
 } from "@/lib/confidence";
 import type { ConfidenceResult, Direction } from "@/lib/confidence";
-import type { Bar } from "@/lib/engine";
+import { rsi as rsiSeries, type Bar } from "@/lib/engine";
+import { macd as macdSeries } from "@/lib/indicators";
 
 /* -------------------------------------------------------------------------- */
 /* constants                                                                   */
@@ -40,6 +45,8 @@ import type { Bar } from "@/lib/engine";
 const TIMEFRAMES = ["M5", "M15", "M30", "H1", "H4"] as const;
 const HISTORY = 240;
 const CANDLE_MS = 15_000;
+/** Price cadence. Kept at the project's standing 3s. */
+const PRICE_MS = 3_000;
 const DEFAULT_THRESHOLD = 80;
 const MAX_ALERTS = 25;
 
@@ -118,6 +125,7 @@ export default function PropFirmDesk() {
   const [weights, setWeights] = useState({ ...DEFAULT_WEIGHTS });
   const [result, setResult] = useState<ConfidenceResult | null>(null);
   const [bars, setBars] = useState<Bar[]>([]);
+  const [quote, setQuote] = useState<BrokerQuote | null>(null);
   const [loading, setLoading] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [alerts, setAlerts] = useState<AlertRecord[]>([]);
@@ -286,6 +294,33 @@ export default function PropFirmDesk() {
     evaluatedT.current = null;
   }, [symbol, timeframe]);
 
+  const loadPrice = useCallback(async () => {
+    if (!connected) return;
+    const token = await brokerToken();
+    const next = await api.brokerPrice(symbol, undefined, token);
+    if (next.available) setQuote(next);
+  }, [brokerToken, connected, symbol]);
+
+  useEffect(() => {
+    if (!connected) {
+      setQuote(null);
+      return;
+    }
+    let cancelled = false;
+    let timer: number;
+    const tick = async () => {
+      if (cancelled) return;
+      await loadPrice();
+      if (cancelled) return;
+      timer = window.setTimeout(() => void tick(), PRICE_MS);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [connected, loadPrice]);
+
   /* ------------------------------ positions ------------------------------ */
 
   const refreshPositions = useCallback(async () => {
@@ -347,6 +382,37 @@ export default function PropFirmDesk() {
   /* ------------------------------ derived -------------------------------- */
 
   const firm = firms.find((f) => f.id === firmId) ?? null;
+
+  const closes = useMemo(() => bars.map((b) => b.c), [bars]);
+  const macdView = useMemo(
+    () => (closes.length > 35 ? macdSeries(closes) : null),
+    [closes],
+  );
+  const rsiView = useMemo(
+    () => (closes.length > 15 ? rsiSeries(closes, 14) : null),
+    [closes],
+  );
+
+  const digits = selected
+    ? Math.max(0, Math.round(-Math.log10(selected.pip || 0.0001)))
+    : 2;
+
+  const livePrice = quote?.last ?? null;
+
+  // Measured from the broker's own bid/ask, against the instrument's limit.
+  // Displayed, not silently enforced — see the note under the chart.
+  const spreadInfo = useMemo(() => {
+    if (!quote?.bid || !quote?.ask || !selected) return null;
+    const raw = quote.ask - quote.bid;
+    const mid = (quote.ask + quote.bid) / 2;
+    const limit = selected.spread_limit;
+    if (limit.unit === "bps" && mid > 0) {
+      const bps = (raw / mid) * 10_000;
+      return { value: bps, limit: limit.bps, unit: "bps", ok: bps <= limit.bps };
+    }
+    const pips = raw / (selected.pip || 0.0001);
+    return { value: pips, limit: limit.pips, unit: "pips", ok: pips <= limit.pips };
+  }, [quote, selected]);
 
   const guardrailWarnings = useMemo(() => {
     if (!firm) return [];
@@ -434,8 +500,20 @@ export default function PropFirmDesk() {
           <BellRing className="h-4 w-4 text-amber-300" />
           <h2 className="text-sm font-semibold text-white">Threshold &amp; alert engine</h2>
           <span className="ml-auto flex items-center gap-3">
-            <Toggle checked={alertsOn} onChange={setAlertsOn} label="Alerts" />
-            <Toggle checked={soundOn} onChange={setSoundOn} label="Sound" />
+            <Toggle
+              checked={alertsOn}
+              onChange={setAlertsOn}
+              label="Alerts"
+              onText="Armed"
+              offText="Muted"
+            />
+            <Toggle
+              checked={soundOn}
+              onChange={setSoundOn}
+              label="Sound"
+              onText="On"
+              offText="Off"
+            />
           </span>
         </div>
 
@@ -566,6 +644,58 @@ export default function PropFirmDesk() {
             <Spinner /> Loading candles…
           </p>
         )}
+      </Card>
+
+      {/* --------------------------- live chart -------------------------- */}
+      <Card className="p-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <LineChart className="h-4 w-4 text-amber-300" />
+          <h2 className="text-sm font-semibold text-white">
+            Live chart · {symbol} {timeframe}
+          </h2>
+          {quote?.bid != null && quote?.ask != null && (
+            <Badge tone="neutral">
+              {quote.bid.toFixed(digits)} / {quote.ask.toFixed(digits)}
+            </Badge>
+          )}
+          {spreadInfo && (
+            <Badge tone={spreadInfo.ok ? "mint" : "rose"}>
+              spread {spreadInfo.value.toFixed(1)} {spreadInfo.unit} · limit{" "}
+              {spreadInfo.limit}
+            </Badge>
+          )}
+          <span className="ml-auto text-[11px] text-white/35">{bars.length} bars</span>
+        </div>
+
+        {bars.length > 1 ? (
+          <div className="space-y-1">
+            <LiveChart
+              candles={bars}
+              timeframe={timeframe}
+              livePrice={livePrice}
+              digits={digits}
+            />
+            {macdView && (
+              <MacdChart
+                histogram={macdView.histogram}
+                macd={macdView.macd}
+                signal={macdView.signal}
+              />
+            )}
+            {rsiView && <RsiChart values={rsiView} oversold={30} overbought={70} />}
+          </div>
+        ) : (
+          <p className="flex items-center gap-2 text-[12px] text-white/45">
+            <Spinner /> Waiting for candle history…
+          </p>
+        )}
+
+        <p className="mt-2 text-[11px] leading-relaxed text-white/35">
+          The two panes are the same MACD and RSI the confidence score reads, so
+          you can see what a score is reacting to. The spread is measured from
+          live bid/ask against the instrument&apos;s limit — it is reported here
+          so a wide spread is visible, but it does not yet veto an entry.
+        </p>
       </Card>
 
       {/* --------------------------- weights --------------------------- */}
@@ -702,7 +832,13 @@ export default function PropFirmDesk() {
             </div>
 
             <div className="flex flex-wrap items-center gap-4">
-              <Toggle checked={liveMode} onChange={setLiveMode} label={liveMode ? "Live" : "Paper"} />
+              <Toggle
+                checked={liveMode}
+                onChange={setLiveMode}
+                label="Execution mode"
+                onText="Live"
+                offText="Paper"
+              />
               <Toggle
                 checked={autoTrade}
                 onChange={(next) => {
@@ -713,6 +849,8 @@ export default function PropFirmDesk() {
                   setAutoTrade(next);
                 }}
                 label="Auto-trade"
+                onText="Armed"
+                offText="Off"
               />
               <span className="text-[11px] text-white/35">
                 fires at ≥{threshold}%

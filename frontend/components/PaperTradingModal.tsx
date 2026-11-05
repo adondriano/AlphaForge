@@ -111,7 +111,9 @@ export default function PaperTradingModal({
             <Toggle
               checked={running}
               onChange={onToggle}
-              label={running ? "Paper ON" : "Paper OFF"}
+              label="Paper trading"
+              onText="Running"
+              offText="Stopped"
             />
             <button
               type="button"

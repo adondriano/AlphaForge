@@ -83,6 +83,7 @@ export default function StrategyCard({
                 checked={strategy.autonomous}
                 onChange={(value) => void toggleAutonomous(strategy, value)}
                 label={`Autonomous trading for ${strategy.name}`}
+                showLabel={false}
               />
             </div>
           </div>
@@ -93,6 +94,7 @@ export default function StrategyCard({
                 checked={Boolean(strategy.paper_trading)}
                 onChange={(value) => void togglePaperTrading(strategy, value)}
                 label={`Paper trading for ${strategy.name}`}
+                showLabel={false}
               />
             </div>
           </div>

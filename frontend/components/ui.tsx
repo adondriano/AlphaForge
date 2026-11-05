@@ -92,18 +92,36 @@ export function Stat({
   );
 }
 
+/**
+ * A switch that says what it switches.
+ *
+ * `label` used to be applied as `aria-label` only and never rendered, so every
+ * toggle on the site was an unlabelled pill — you could see the state but not
+ * what it controlled. The label is now drawn next to the switch along with the
+ * current state.
+ *
+ * Pass `showLabel={false}` where surrounding markup already captions the
+ * control, so the same text is not repeated twice.
+ */
 export function Toggle({
   checked,
   onChange,
   label,
   disabled,
+  showLabel = true,
+  onText = "On",
+  offText = "Off",
 }: {
   checked: boolean;
   onChange: (value: boolean) => void;
   label?: string;
   disabled?: boolean;
+  showLabel?: boolean;
+  /** What the "on" state means, for switches where On/Off is unclear. */
+  onText?: string;
+  offText?: string;
 }) {
-  return (
+  const control = (
     <button
       type="button"
       role="switch"
@@ -127,6 +145,23 @@ export function Toggle({
         )}
       />
     </button>
+  );
+
+  if (!label || !showLabel) return control;
+
+  return (
+    <span className="inline-flex select-none items-center gap-2">
+      {control}
+      <span className="text-[12px] text-white/70">{label}</span>
+      <span
+        className={cx(
+          "text-[10px] font-medium uppercase tracking-wide",
+          checked ? "text-emerald-300" : "text-white/35",
+        )}
+      >
+        {checked ? onText : offText}
+      </span>
+    </span>
   );
 }
 
